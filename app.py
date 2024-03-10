@@ -5,9 +5,7 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 
 app = Flask(__name__, static_folder="build", static_url_path="/")
-app.config["SQLALCHEMY_DATABASE_URI"] = (
-    "mysql+pymysql://ritual:ritualpass@localhost/ritual"
-)
+app.config["SQLALCHEMY_DATABASE_URI"] = "mysql+pymysql://ritual:ritualpass@localhost/ritual"
 
 CORS(app)
 
@@ -44,8 +42,8 @@ def add_activity():
     new_activity = Activity(
         user_id=1,
         name=request.json["activity_name"],
-        activity_begin=datetime.now(),
-        activity_end=datetime.now() - timedelta(minutes=int(request.json["duration"])),
+        activity_begin=datetime.now() - timedelta(minutes=int(request.json["duration"])),
+        activity_end=datetime.now(),
         memo=request.json["memo"],
     )
 
@@ -61,6 +59,7 @@ def add_activity():
     return jsonify(response)
 
 
+@app.route("/get-summary")
 @app.route("/")
 def serve():
     return send_from_directory(app.static_folder, "index.html")
