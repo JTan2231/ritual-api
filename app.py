@@ -39,7 +39,32 @@ class Activity(db.Model):
 
 @app.route("/get-activities", methods=["GET"])
 def get_activities():
-    return jsonify({"message": "todo"})
+    begin_date = datetime.strptime(request.args.get("beginDate", ""), "%Y-%m-%d")
+    end_date = datetime.strptime(request.args.get("endDate", ""), "%Y-%m-%d")
+
+    activities = Activity.query.filter(
+        Activity.activity_begin >= begin_date, Activity.activity_end <= end_date
+    ).all()
+
+    days = {}
+    for a in activities:
+        begin = a.activity_begin.strftime("%Y-%m-%d")
+        item = {
+            "activity_name": a.name,
+            "begin_time": a.activity_begin.strftime("%H:%M:%S"),
+            "memo": a.memo,
+        }
+
+        if begin in days:
+            days[begin].append(item)
+        else:
+            days[begin] = [item]
+
+    days = {
+        key: sorted(value, key=lambda x: x["begin_time"]) for key, value in days.items()
+    }
+
+    return jsonify(days)
 
 
 @app.route("/add-activity", methods=["POST"])
