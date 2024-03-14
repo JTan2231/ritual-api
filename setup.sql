@@ -1,4 +1,5 @@
 create database if not exists ritual;
+use ritual;
 
 CREATE TABLE if not exists user (
     user_id INT AUTO_INCREMENT PRIMARY KEY,

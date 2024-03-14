@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -8,9 +9,7 @@ from openai import OpenAI
 openai_client = OpenAI()
 
 app = Flask(__name__, static_folder="build", static_url_path="/")
-app.config["SQLALCHEMY_DATABASE_URI"] = (
-    "mysql+pymysql://ritual:ritualpass@localhost/ritual"
-)
+app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["RITUAL_DB_URL"]
 
 CORS(app)
 
