@@ -1,5 +1,7 @@
 import os
+from base64 import b64decode
 from datetime import datetime, timedelta
+from functools import wraps
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -19,9 +21,35 @@ db = SQLAlchemy(app)
 TEST_ID = 1
 
 
+def authenticate(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        auth = request.headers.get("Authorization")
+        if auth is None:
+            return "Unauthorized", 401
+        else:
+            type, encoded_credentials = auth.split(" ", 1)
+            if type.lower() == "basic":
+                username, password = (
+                    b64decode(encoded_credentials).decode("utf-8").split(":", 1)
+                )
+            else:
+                return "Unauthorized", 401
+
+            user = User.query.filter_by(username=username).one()
+
+            if password == user.password:
+                request.user_id = user.user_id
+                return func(*args, **kwargs)
+            else:
+                return "Unauthorized", 401
+
+    return wrapper
+
+
 class User(db.Model):
     user_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    username = db.Column(db.String(256), nullable=False)
+    username = db.Column(db.String(256), nullable=False, unique=True)
     password = db.Column(db.String(256), nullable=False)
 
 
@@ -36,13 +64,34 @@ class Activity(db.Model):
     user = db.relationship("User", backref=db.backref("activities", lazy=True))
 
 
+@app.route("/create-account", methods=["POST"])
+def create_account():
+    new_user = User(
+        username=request.json["username"], password=request.json["password"]
+    )
+
+    db.session.add(new_user)
+    response = {}
+    try:
+        db.session.commit()
+        response["message"] = "User successfully created"
+    except Exception as e:
+        print(e)
+        response["message"] = "There was an error creating the user: " + str(e)
+
+    return jsonify(response)
+
+
 @app.route("/get-activities", methods=["GET"])
+@authenticate
 def get_activities():
     begin_date = datetime.strptime(request.args.get("beginDate", ""), "%Y-%m-%d")
     end_date = datetime.strptime(request.args.get("endDate", ""), "%Y-%m-%d")
 
     activities = Activity.query.filter(
-        Activity.activity_begin >= begin_date, Activity.activity_end <= end_date
+        Activity.activity_begin >= begin_date,
+        Activity.activity_end <= end_date,
+        Activity.user_id == request.user_id,
     ).all()
 
     days = {}
@@ -67,9 +116,10 @@ def get_activities():
 
 
 @app.route("/add-activity", methods=["POST"])
+@authenticate
 def add_activity():
     new_activity = Activity(
-        user_id=1,
+        user_id=request.user_id,
         name=request.json["activity_name"],
         activity_begin=datetime.now()
         - timedelta(minutes=int(request.json["duration"])),
@@ -90,12 +140,15 @@ def add_activity():
 
 
 @app.route("/get-summary", methods=["GET"])
+@authenticate
 def get_summary():
     begin_date = datetime.strptime(request.args.get("beginDate", ""), "%Y-%m-%d")
     end_date = datetime.strptime(request.args.get("endDate", ""), "%Y-%m-%d")
 
     activities = Activity.query.filter(
-        Activity.activity_begin >= begin_date, Activity.activity_end <= end_date
+        Activity.activity_begin >= begin_date,
+        Activity.activity_end <= end_date,
+        Activity.user_id == request.user_id,
     ).all()
 
     activities_prompt = "Activities:\n- " + "\n- ".join(
