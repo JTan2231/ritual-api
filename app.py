@@ -1,6 +1,7 @@
+import json
 import os
 from base64 import b64decode
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from functools import wraps
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -19,6 +20,10 @@ db = SQLAlchemy(app)
 
 # TODO: Change this when auth is implemented
 TEST_ID = 1
+TEMPERATURE = 0.05
+DATE_FORMAT = "%Y-%m-%d"
+TIME_FORMAT = "%H:%M:%S"
+DATETIME_FORMAT = f"{DATE_FORMAT} {TIME_FORMAT}"
 
 
 def authenticate(func):
@@ -64,6 +69,104 @@ class Activity(db.Model):
     user = db.relationship("User", backref=db.backref("activities", lazy=True))
 
 
+def activities_to_json(activities):
+    jsons = []
+    for a in activities:
+        jsons.append(
+            {
+                "activity_name": a.name,
+                "activity_begin": a.activity_begin.strftime(DATETIME_FORMAT),
+                "activity_end": a.activity_end.strftime(DATETIME_FORMAT),
+                "memo": a.memo,
+            }
+        )
+
+    return jsons
+
+
+def date_from_datetime(datetime_string):
+    return datetime.strftime(
+        datetime.strptime(datetime_string, DATETIME_FORMAT), DATE_FORMAT
+    )
+
+
+def time_from_datetime(datetime_string):
+    return datetime.strftime(
+        datetime.strptime(datetime_string, DATETIME_FORMAT), TIME_FORMAT
+    )
+
+
+# makes datetime with current date
+def time_to_datetime(time_string):
+    return datetime.combine(
+        date.today(), datetime.strptime(time_string, TIME_FORMAT).time()
+    ).strftime(DATETIME_FORMAT)
+
+
+def group_by_days(activities):
+    days = {}
+    for a in activities:
+        begin = date_from_datetime(a["activity_begin"])
+
+        if begin in days:
+            days[begin].append(a)
+        else:
+            days[begin] = [a]
+
+    days = {
+        key: sorted(value, key=lambda x: x["activity_begin"])
+        for key, value in days.items()
+    }
+
+    return days
+
+
+# TODO: better error handling when this fails
+def activity_from_chat(chat):
+    oai_response = openai_client.chat.completions.create(
+        model="gpt-4",
+        temperature=TEMPERATURE,
+        messages=[
+            {
+                "role": "system",
+                "content": f'You are an assistant designed to convert conversationally-styled messages describing the user\'s activities and turn them into a list of objects, each object of the following JSON format: {{ "activity_name": "name of activity (string)", "activity_begin": "timestamp ({TIME_FORMAT}) of when the activity began", "activity_end": "timestamp ({TIME_FORMAT}) of when the activity ended", "memo": "a string describing the details of the activity" }}',
+            },
+            {"role": "user", "content": chat},
+        ],
+    )
+
+    try:
+        activities = json.loads(oai_response.choices[0].message.content)
+        for a in activities:
+            a["activity_begin"] = time_to_datetime(a["activity_begin"])
+            a["activity_end"] = time_to_datetime(a["activity_end"])
+
+        return activities
+    except Exception as e:
+        print(oai_response)
+        print("error parsing OAI response: " + str(e))
+        return {}
+
+
+def format_activity_json_to_display(activities):
+    grouped = group_by_days(activities)
+    for g in grouped.values():
+        for a in g:
+            a["activity_begin"] = time_from_datetime(a["activity_begin"])
+            a["activity_end"] = time_from_datetime(a["activity_end"])
+
+    return grouped
+
+
+# temporary route; merge this with `add-activity`
+@app.route("/chat", methods=["POST"])
+@authenticate
+def chat():
+    chat_json = activity_from_chat(request.json["chat"])
+
+    return jsonify(format_activity_json_to_display(chat_json))
+
+
 @app.route("/create-account", methods=["POST"])
 def create_account():
     new_user = User(
@@ -85,8 +188,8 @@ def create_account():
 @app.route("/get-activities", methods=["GET"])
 @authenticate
 def get_activities():
-    begin_date = datetime.strptime(request.args.get("beginDate", ""), "%Y-%m-%d")
-    end_date = datetime.strptime(request.args.get("endDate", ""), "%Y-%m-%d")
+    begin_date = datetime.strptime(request.args.get("beginDate", ""), DATE_FORMAT)
+    end_date = datetime.strptime(request.args.get("endDate", ""), DATE_FORMAT)
 
     activities = Activity.query.filter(
         Activity.activity_begin >= begin_date,
@@ -94,25 +197,34 @@ def get_activities():
         Activity.user_id == request.user_id,
     ).all()
 
-    days = {}
-    for a in activities:
-        begin = a.activity_begin.strftime("%Y-%m-%d")
-        item = {
-            "activity_name": a.name,
-            "begin_time": a.activity_begin.strftime("%H:%M:%S"),
-            "memo": a.memo,
-        }
+    activities = activities_to_json(activities)
 
-        if begin in days:
-            days[begin].append(item)
-        else:
-            days[begin] = [item]
+    return jsonify(format_activity_json_to_display(activities))
 
-    days = {
-        key: sorted(value, key=lambda x: x["begin_time"]) for key, value in days.items()
-    }
 
-    return jsonify(days)
+@app.route("/add-activities", methods=["POST"])
+@authenticate
+def add_activities():
+    for a in request.json:
+        db.session.add(
+            Activity(
+                user_id=request.user_id,
+                name=a["activity_name"],
+                activity_begin=time_to_datetime(a["activity_begin"]),
+                activity_end=time_to_datetime(a["activity_end"]),
+                memo=a["memo"],
+            )
+        )
+
+    response = {}
+    try:
+        db.session.commit()
+        response["message"] = "Activities added successfully"
+    except Exception as e:
+        print(e)
+        response["message"] = "There was an error adding the activities: " + str(e)
+
+    return jsonify(response)
 
 
 @app.route("/add-activity", methods=["POST"])
@@ -142,8 +254,8 @@ def add_activity():
 @app.route("/get-summary", methods=["GET"])
 @authenticate
 def get_summary():
-    begin_date = datetime.strptime(request.args.get("beginDate", ""), "%Y-%m-%d")
-    end_date = datetime.strptime(request.args.get("endDate", ""), "%Y-%m-%d")
+    begin_date = datetime.strptime(request.args.get("beginDate", ""), DATE_FORMAT)
+    end_date = datetime.strptime(request.args.get("endDate", ""), DATE_FORMAT)
 
     activities = Activity.query.filter(
         Activity.activity_begin >= begin_date,
@@ -158,7 +270,7 @@ def get_summary():
 
     oai_response = openai_client.chat.completions.create(
         model="gpt-4",
-        temperature=0.05,
+        temperature=TEMPERATURE,
         messages=[
             {
                 "role": "system",
