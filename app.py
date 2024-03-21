@@ -58,15 +58,21 @@ class User(db.Model):
     password = db.Column(db.String(256), nullable=False)
 
 
+class Ethos(db.Model):
+    ethos_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"), nullable=False)
+    core = db.Column(db.String(4096), nullable=False)
+    summary = db.Column(db.String(4096))
+    feedback = db.Column(db.String(4096))
+
+
 class Activity(db.Model):
     activity_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"))
     name = db.Column(db.String(256), nullable=False)
     activity_begin = db.Column(db.DateTime, nullable=False)
     activity_end = db.Column(db.DateTime, nullable=False)
     memo = db.Column(db.String(512), nullable=False)
-
-    user = db.relationship("User", backref=db.backref("activities", lazy=True))
 
 
 def activities_to_json(activities):
@@ -233,9 +239,8 @@ def add_activity():
     new_activity = Activity(
         user_id=request.user_id,
         name=request.json["activity_name"],
-        activity_begin=datetime.now()
-        - timedelta(minutes=int(request.json["duration"])),
-        activity_end=datetime.now(),
+        activity_begin=request.json["activity_begin"],
+        activity_end=request.json["activity_end"],
         memo=request.json["memo"],
     )
 
@@ -274,7 +279,7 @@ def get_summary():
         messages=[
             {
                 "role": "system",
-                "content": "You are a world class accountability partner. In these messages, you will receive a list of activities and their memos formatted `{activity_name} -- {activity_begin} - {activity_end} -- `{activity_memo}`; summarize what has been accomplished based on their memos with a penetrating and empathetic insight. Be careful! You _must_ be concise--_never_ belabor a point! Sing your praises, suggest your critique, and move on (if--_and only if!_--you have any of these to share). _Never_ spend more than a phrase on a topic! If you notice a break in the routine of these activities, point them out! Encourage routine, habits, and rituals above all else. Appreciate nuance, but consider things on a long timescale--minute changes do not matter! What matters is the patterns and changes over the course of *many* activities. Discouragement and critique should _only_ come from unsteady/shaky habits. Praise should come in short supply! _Do not_ overly praise everything the user has done--only that which is deserving! Exercise taste. If you don't have context on why something might be meaningful, _do not_ comment on it.",
+                "content": "As a premier accountability partner, you'll delve into activities and their nuances, formatted as {activity_name} -- {activity_begin} - {activity_end} -- {activity_memo}. Your task is to distill these moments with both precision and empathy. Strike a balance—be succinct, yet understanding. Lift spirits with praise, offer critiques with care, then promptly move on. Words are your tools; wield them wisely, sparingly. Highlight deviations in routines with a constructive lens, advocating for the power of consistency and ritual. Focus on patterns over time, understanding the significance of long-term evolution over fleeting changes. Let critiques emerge from patterns of inconsistency, saving your commendations for truly notable achievements. Your encouragement is a beacon; use it to illuminate paths to improvement, always with an eye for growth and understanding. Absent context, reserve judgment, embracing your role with both decisiveness and compassion",
             },
             {
                 "role": "user",
@@ -284,6 +289,62 @@ def get_summary():
     )
 
     return jsonify({"response": oai_response.choices[0].message.content})
+
+
+@app.route("/tune", methods=["POST"])
+@authenticate
+def tune():
+    core = request.json["core"]
+    summary = request.json["summary"]
+    feedback = request.json["feedback"]
+
+    ethos = Ethos.query.filter_by(user_id=request.user_id).first()
+
+    def get_oai_response(request, prompt):
+        oai_response = openai_client.chat.completions.create(
+            model="gpt-4",
+            temperature=TEMPERATURE,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a master of rewording an excerpt to change its aesthetic meaning while retaining its functional purpose--the best in class. What you will receive is a message in format `REQUEST {request_text}\n---\nPROMPT {prompt_text}`. Your job is to rephrase `{prompt_text}` to fit the needs of `{request_text}`. Respond with _only_ the rephrased prompt--nothing else.",
+                },
+                {
+                    "role": "user",
+                    "content": f"REQUEST {{{request}}}\n---\nPROMPT {{{prompt}}}",
+                },
+            ],
+        )
+
+        return oai_response.choices[0].message.content
+
+    if ethos is None:
+        ethos = Ethos(
+            user_id=request.user_id, core=core, summary=summary, feedback=feedback
+        )
+
+    updated_ethos = ""
+    if len(core) > 0:
+        updated_ethos = get_oai_response(core, ethos.core)
+    elif len(summary) > 0:
+        updated_ethos = get_oai_response(summary, ethos.summary)
+    elif len(feedback) > 0:
+        updated_ethos = get_oai_response(feedback, ethos.feedback)
+
+    ethos.core = updated_ethos if len(core) > 0 else ethos.core
+    ethos.summary = updated_ethos if len(summary) > 0 else ethos.summary
+    ethos.feedback = updated_ethos if len(feedback) > 0 else ethos.feedback
+
+    response = {}
+    try:
+        db.session.add(ethos)
+        db.session.commit()
+        response["message"] = "Ethos updated successfully"
+    except Exception as e:
+        print(e)
+        response["message"] = "There was an error updating the ethos: " + str(e)
+
+    return jsonify(response)
 
 
 @app.route("/")
