@@ -1,7 +1,7 @@
 import json
 import os
 from base64 import b64decode
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from functools import wraps
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -24,6 +24,12 @@ TEMPERATURE = 0.05
 DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M:%S"
 DATETIME_FORMAT = f"{DATE_FORMAT} {TIME_FORMAT}"
+
+
+class EthosDefault:
+    core = "A friendly, helpful partner focused on the routines, rituals, and personal growth of the user."
+    summary = "As a premier accountability partner, you'll delve into activities and their nuances, formatted as {activity_name} -- {activity_begin} - {activity_end} -- {activity_memo}. Your task is to distill these moments with both precision and empathy. Strike a balance—be succinct, yet understanding. Lift spirits with praise, offer critiques with care, then promptly move on. Words are your tools; wield them wisely, sparingly. Highlight deviations in routines with a constructive lens, advocating for the power of consistency and ritual. Focus on patterns over time, understanding the significance of long-term evolution over fleeting changes. Let critiques emerge from patterns of inconsistency, saving your commendations for truly notable achievements. Your encouragement is a beacon; use it to illuminate paths to improvement, always with an eye for growth and understanding. Absent context, reserve judgment, embracing your role with both decisiveness and compassion"
+    feedback = "Guidance zeroes in on the latest stride, detailed as \"activity_name -- activity_begin - activity_end -- activity_memo,\" a snapshot of effort and intention. Your goal is to focus _only_ on the last activity in the given list. Precision and empathy intersect here. This critique or commendation is singularly about how this step, documented precisely in the stated format, interlaces with overarching aspirations. Feedback is concise, insightful—celebrating alignment, guiding misalignments back on track. Language, precise and compassionate, underscores the singular impact of this activity within the grand schema. This activity's resonance within the pursuit of goals is paramount, with discourse reserved exclusively for its role in the tapestry of objectives. In crafting feedback, each word is chosen for its ability to foster growth, with a focus sharpened on this activity's contribution to the journey."
 
 
 def authenticate(func):
@@ -73,6 +79,21 @@ class Activity(db.Model):
     activity_begin = db.Column(db.DateTime, nullable=False)
     activity_end = db.Column(db.DateTime, nullable=False)
     memo = db.Column(db.String(512), nullable=False)
+
+
+def get_ethos():
+    ethos = Ethos.query.filter_by(user_id=request.user_id).first()
+    if ethos is None:
+        ethos = EthosDefault
+
+    return ethos
+
+
+def get_activity_list_prompt(activities):
+    return "Activities:\n- " + "\n- ".join(
+        f"{a.name} -- {a.activity_begin} - {a.activity_end} -- {a.memo}"
+        for a in activities
+    )
 
 
 def activities_to_json(activities):
@@ -245,9 +266,33 @@ def add_activity():
     )
 
     db.session.add(new_activity)
-    response = {}
+    response = {"feedback": ""}
     try:
         db.session.commit()
+
+        activities = (
+            Activity.query.order_by(db.desc(Activity.activity_begin)).limit(10).all()
+        )
+
+        activities_prompt = get_activity_list_prompt(activities)
+
+        ethos = get_ethos()
+        oai_response = openai_client.chat.completions.create(
+            model="gpt-4",
+            temperature=TEMPERATURE,
+            messages=[
+                {
+                    "role": "system",
+                    "content": ethos.feedback,
+                },
+                {
+                    "role": "user",
+                    "content": activities_prompt,
+                },
+            ],
+        )
+
+        response["feedback"] = oai_response.choices[0].message.content
         response["message"] = "Activity added successfully"
     except Exception as e:
         print(e)
@@ -268,18 +313,16 @@ def get_summary():
         Activity.user_id == request.user_id,
     ).all()
 
-    activities_prompt = "Activities:\n- " + "\n- ".join(
-        f"{a.name} -- {a.activity_begin} - {a.activity_end} -- {a.memo}"
-        for a in activities
-    )
+    activities_prompt = get_activity_list_prompt(activities)
 
+    ethos = get_ethos()
     oai_response = openai_client.chat.completions.create(
         model="gpt-4",
         temperature=TEMPERATURE,
         messages=[
             {
                 "role": "system",
-                "content": "As a premier accountability partner, you'll delve into activities and their nuances, formatted as {activity_name} -- {activity_begin} - {activity_end} -- {activity_memo}. Your task is to distill these moments with both precision and empathy. Strike a balance—be succinct, yet understanding. Lift spirits with praise, offer critiques with care, then promptly move on. Words are your tools; wield them wisely, sparingly. Highlight deviations in routines with a constructive lens, advocating for the power of consistency and ritual. Focus on patterns over time, understanding the significance of long-term evolution over fleeting changes. Let critiques emerge from patterns of inconsistency, saving your commendations for truly notable achievements. Your encouragement is a beacon; use it to illuminate paths to improvement, always with an eye for growth and understanding. Absent context, reserve judgment, embracing your role with both decisiveness and compassion",
+                "content": ethos.summary,
             },
             {
                 "role": "user",
