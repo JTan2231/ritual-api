@@ -28,3 +28,13 @@ CREATE TABLE if not exists activity (
 
     constraint fk_user foreign key (user_id) references user(user_id)
 );
+
+create table if not exists goal (
+    goal_id int auto_increment primary key,
+    user_id int not null,
+    name varchar(256) not null,
+    description varchar(4096) not null,
+
+    constraint fk_user_goal foreign key (user_id) references user(user_id),
+    constraint uc_user_id_name unique (user_id, name)
+);

@@ -28,8 +28,8 @@ DATETIME_FORMAT = f"{DATE_FORMAT} {TIME_FORMAT}"
 
 class EthosDefault:
     core = "A friendly, helpful partner focused on the routines, rituals, and personal growth of the user."
-    summary = "As a premier accountability partner, you'll delve into activities and their nuances, formatted as {activity_name} -- {activity_begin} - {activity_end} -- {activity_memo}. Your task is to distill these moments with both precision and empathy. Strike a balance—be succinct, yet understanding. Lift spirits with praise, offer critiques with care, then promptly move on. Words are your tools; wield them wisely, sparingly. Highlight deviations in routines with a constructive lens, advocating for the power of consistency and ritual. Focus on patterns over time, understanding the significance of long-term evolution over fleeting changes. Let critiques emerge from patterns of inconsistency, saving your commendations for truly notable achievements. Your encouragement is a beacon; use it to illuminate paths to improvement, always with an eye for growth and understanding. Absent context, reserve judgment, embracing your role with both decisiveness and compassion"
-    feedback = "Guidance zeroes in on the latest stride, detailed as \"activity_name -- activity_begin - activity_end -- activity_memo,\" a snapshot of effort and intention. Your goal is to focus _only_ on the last activity in the given list. Precision and empathy intersect here. This critique or commendation is singularly about how this step, documented precisely in the stated format, interlaces with overarching aspirations. Feedback is concise, insightful—celebrating alignment, guiding misalignments back on track. Language, precise and compassionate, underscores the singular impact of this activity within the grand schema. This activity's resonance within the pursuit of goals is paramount, with discourse reserved exclusively for its role in the tapestry of objectives. In crafting feedback, each word is chosen for its ability to foster growth, with a focus sharpened on this activity's contribution to the journey."
+    summary = "As a premier accountability partner, you'll delve into activities and their nuances, formatted as {activity_name} -- {activity_begin} - {activity_end} -- {activity_memo}. Followed by this list will be a second list of the user's stated goals, of format {goal_name} -- {goal_description}. Your task is to distill these moments with both precision and empathy. Strike a balance—be succinct, yet understanding. Lift spirits with praise, offer critiques with care, then promptly move on. Words are your tools; wield them wisely, sparingly. Highlight deviations in routines with a constructive lens, advocating for the power of consistency and ritual. Focus on patterns over time, understanding the significance of long-term evolution over fleeting changes. Let critiques emerge from patterns of inconsistency, saving your commendations for truly notable achievements. Your encouragement is a beacon; use it to illuminate paths to improvement, always with an eye for growth and understanding. Absent context, reserve judgment, embracing your role with both decisiveness and compassion"
+    feedback = "Guidance zeroes in on the latest stride, detailed as \"activity_name -- activity_begin - activity_end -- activity_memo,\" a snapshot of effort and intention. Followed by this list will be a second list of the user's stated goals, of format {goal_name} -- {goal_description}. Your goal is to focus _only_ on the last activity in the first given list. Precision and empathy intersect here. This critique or commendation is singularly about how this step, documented precisely in the stated format, interlaces with overarching aspirations. Feedback is concise, insightful—celebrating alignment, guiding misalignments back on track. Language, precise and compassionate, underscores the singular impact of this activity within the grand schema. This activity's resonance within the pursuit of goals is paramount, with discourse reserved exclusively for its role in the tapestry of objectives--if, _and only if!_, there are goals in mind. In crafting feedback, each word is chosen for its ability to foster growth, with a focus sharpened on this activity's contribution to the journey."
 
 
 def authenticate(func):
@@ -81,6 +81,13 @@ class Activity(db.Model):
     memo = db.Column(db.String(512), nullable=False)
 
 
+class Goal(db.Model):
+    goal_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"), nullable=False)
+    name = db.Column(db.String(256), nullable=False)
+    description = db.Column(db.String(4096), nullable=False)
+
+
 def get_ethos():
     ethos = Ethos.query.filter_by(user_id=request.user_id).first()
     if ethos is None:
@@ -89,10 +96,23 @@ def get_ethos():
     return ethos
 
 
-def get_activity_list_prompt(activities):
+def get_activity_formatted_string(activities):
     return "Activities:\n- " + "\n- ".join(
         f"{a.name} -- {a.activity_begin} - {a.activity_end} -- {a.memo}"
         for a in activities
+    )
+
+
+# retrieve + format
+def get_goals_formatted_string(goals):
+    return "Goals:\n- " + "\n- ".join(f"{g.name} -- {g.description}" for g in goals)
+
+
+def format_activities_and_goals(activities, goals):
+    return (
+        get_activity_formatted_string(activities)
+        + "---\n"
+        + get_goals_formatted_string(goals)
     )
 
 
@@ -274,7 +294,9 @@ def add_activity():
             Activity.query.order_by(db.desc(Activity.activity_begin)).limit(10).all()
         )
 
-        activities_prompt = get_activity_list_prompt(activities)
+        goals = Goal.query.filter_by(user_id=request.user_id).all()
+
+        activities_and_goals = format_activities_and_goals(activities, goals)
 
         ethos = get_ethos()
         oai_response = openai_client.chat.completions.create(
@@ -287,7 +309,7 @@ def add_activity():
                 },
                 {
                     "role": "user",
-                    "content": activities_prompt,
+                    "content": activities_and_goals,
                 },
             ],
         )
@@ -313,7 +335,9 @@ def get_summary():
         Activity.user_id == request.user_id,
     ).all()
 
-    activities_prompt = get_activity_list_prompt(activities)
+    goals = Goal.query.filter_by(user_id=request.user_id).all()
+
+    activities_and_goals = format_activities_and_goals(activities, goals)
 
     ethos = get_ethos()
     oai_response = openai_client.chat.completions.create(
@@ -326,7 +350,7 @@ def get_summary():
             },
             {
                 "role": "user",
-                "content": activities_prompt,
+                "content": activities_and_goals,
             },
         ],
     )
@@ -388,6 +412,51 @@ def tune():
         response["message"] = "There was an error updating the ethos: " + str(e)
 
     return jsonify(response)
+
+
+@app.route("/add-goal", methods=["POST"])
+@authenticate
+def add_goal():
+    new_goal = Goal(
+        user_id=request.user_id,
+        name=request.json["name"],
+        description=request.json["description"],
+    )
+
+    response = {}
+    try:
+        db.session.add(new_goal)
+        db.session.commit()
+        response["message"] = "Goal added successfully"
+    except Exception as e:
+        print(e)
+        response["message"] = "There was an error adding the goal: " + str(e)
+
+    return jsonify(response)
+
+
+@app.route("/get-goals", methods=["GET"])
+@authenticate
+def get_goals():
+    goals = Goal.query.filter_by(user_id=request.user_id).all()
+    return jsonify([{"name": g.name, "description": g.description} for g in goals])
+
+
+@app.route("/delete-goal", methods=["DELETE"])
+@authenticate
+def delete_goal():
+    goal = Goal.query.filter_by(
+        user_id=request.user_id, name=request.args.get("name")
+    ).first()
+
+    try:
+        if goal:
+            db.session.delete(goal)
+            db.session.commit()
+    except Exception as e:
+        print(e)
+
+    return jsonify({"message": "success"})
 
 
 @app.route("/")
