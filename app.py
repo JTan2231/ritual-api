@@ -25,37 +25,13 @@ DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M:%S"
 DATETIME_FORMAT = f"{DATE_FORMAT} {TIME_FORMAT}"
 
+GPT_MODEL = "gpt-4-0125-preview"
+
 
 class EthosDefault:
     core = "A friendly, helpful partner focused on the routines, rituals, and personal growth of the user."
-    summary = "As a premier accountability partner, you'll delve into activities and their nuances, formatted as {activity_name} -- {activity_begin} - {activity_end} -- {activity_memo}. Followed by this list will be a second list of the user's stated goals, of format {goal_name} -- {goal_description}. Your task is to distill these moments with both precision and empathy. Strike a balance—be succinct, yet understanding. Lift spirits with praise, offer critiques with care, then promptly move on. Words are your tools; wield them wisely, sparingly. Highlight deviations in routines with a constructive lens, advocating for the power of consistency and ritual. Focus on patterns over time, understanding the significance of long-term evolution over fleeting changes. Let critiques emerge from patterns of inconsistency, saving your commendations for truly notable achievements. Your encouragement is a beacon; use it to illuminate paths to improvement, always with an eye for growth and understanding. Absent context, reserve judgment, embracing your role with both decisiveness and compassion"
-    feedback = "Guidance zeroes in on the latest stride, detailed as \"activity_name -- activity_begin - activity_end -- activity_memo,\" a snapshot of effort and intention. Followed by this list will be a second list of the user's stated goals, of format {goal_name} -- {goal_description}. Your goal is to focus _only_ on the last activity in the first given list. Precision and empathy intersect here. This critique or commendation is singularly about how this step, documented precisely in the stated format, interlaces with overarching aspirations. Feedback is concise, insightful—celebrating alignment, guiding misalignments back on track. Language, precise and compassionate, underscores the singular impact of this activity within the grand schema. This activity's resonance within the pursuit of goals is paramount, with discourse reserved exclusively for its role in the tapestry of objectives--if, _and only if!_, there are goals in mind. In crafting feedback, each word is chosen for its ability to foster growth, with a focus sharpened on this activity's contribution to the journey."
-
-
-def authenticate(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        auth = request.headers.get("Authorization")
-        if auth is None:
-            return "Unauthorized", 401
-        else:
-            type, encoded_credentials = auth.split(" ", 1)
-            if type.lower() == "basic":
-                username, password = (
-                    b64decode(encoded_credentials).decode("utf-8").split(":", 1)
-                )
-            else:
-                return "Unauthorized", 401
-
-            user = User.query.filter_by(username=username).one()
-
-            if password == user.password:
-                request.user_id = user.user_id
-                return func(*args, **kwargs)
-            else:
-                return "Unauthorized", 401
-
-    return wrapper
+    summary = "As a premier accountability partner, you'll delve into activities and their nuances, formatted as {activity_name} -- {activity_begin} - {activity_end} -- {activity_memo}. Followed by this list will be a second list of the user's stated goals, of format {goal_name} -- {goal_description}. Additionally, for each goal, there is a list of subgoals--each of these is an actionable step in achieving their associated goal. Your task is to distill these moments with both precision and empathy. Strike a balance—be succinct, yet understanding. Lift spirits with praise, offer critiques with care, then promptly move on. Words are your tools; wield them wisely, sparingly. Highlight deviations in routines with a constructive lens, advocating for the power of consistency and ritual. Focus on patterns over time, understanding the significance of long-term evolution over fleeting changes. Let critiques emerge from patterns of inconsistency, saving your commendations for truly notable achievements. Your encouragement is a beacon; use it to illuminate paths to improvement, always with an eye for growth and understanding. Absent context, reserve judgment, embracing your role with both decisiveness and compassion"
+    feedback = "Guidance zeroes in on the latest stride, detailed as \"activity_name -- activity_begin - activity_end -- activity_memo,\" a snapshot of effort and intention. Followed by this list will be a second list of the user's stated goals, of format {goal_name} -- {goal_description}. Additionally, for each goal, there is a list of subgoals--each of these is an actionable step in achieving their associated goal. Your goal is to focus _only_ on the last activity in the first given list. Precision and empathy intersect here. This critique or commendation is singularly about how this step, documented precisely in the stated format, interlaces with overarching aspirations. Feedback is concise, insightful—celebrating alignment, guiding misalignments back on track. Language, precise and compassionate, underscores the singular impact of this activity within the grand schema. This activity's resonance within the pursuit of goals is paramount, with discourse reserved exclusively for its role in the tapestry of objectives--if, _and only if!_, there are goals in mind. In crafting feedback, each word is chosen for its ability to foster growth, with a focus sharpened on this activity's contribution to the journey."
 
 
 class User(db.Model):
@@ -88,6 +64,40 @@ class Goal(db.Model):
     description = db.Column(db.String(4096), nullable=False)
 
 
+class Subgoal(db.Model):
+    subgoal_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    goal_id = db.Column(db.Integer, db.ForeignKey("goal.goal_id"), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"), nullable=False)
+    name = db.Column(db.String(256), nullable=False)
+    description = db.Column(db.String(4096), nullable=False)
+
+
+def authenticate(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        auth = request.headers.get("Authorization")
+        if auth is None:
+            return "Unauthorized", 401
+        else:
+            type, encoded_credentials = auth.split(" ", 1)
+            if type.lower() == "basic":
+                username, password = (
+                    b64decode(encoded_credentials).decode("utf-8").split(":", 1)
+                )
+            else:
+                return "Unauthorized", 401
+
+            user = User.query.filter_by(username=username).one()
+
+            if password == user.password:
+                request.user_id = user.user_id
+                return func(*args, **kwargs)
+            else:
+                return "Unauthorized", 401
+
+    return wrapper
+
+
 def get_ethos():
     ethos = Ethos.query.filter_by(user_id=request.user_id).first()
     if ethos is None:
@@ -103,16 +113,29 @@ def get_activity_formatted_string(activities):
     )
 
 
-# retrieve + format
-def get_goals_formatted_string(goals):
-    return "Goals:\n- " + "\n- ".join(f"{g.name} -- {g.description}" for g in goals)
+# subgoals is a dictionary: { goal.name: subgoal }
+def get_goals_formatted_string(goals, subgoals):
+    output = "Goals:"
+    for g in goals:
+        output += f"\n- {g.name} -- {g.description}"
+        for sg in subgoals[g.name]:
+            output += f"\n  - {sg.name} -- {sg.description}"
+
+        output += "\n"
+
+    return output
 
 
-def format_activities_and_goals(activities, goals):
+def format_activities_and_goals(activities, goals, subgoals):
+    goal_id_name_map = {g.goal_id: g.name for g in goals}
+    subgoal_map = {v: [] for v in goal_id_name_map.values()}
+    for sg in subgoals:
+        subgoal_map[goal_id_name_map[sg.goal_id]].append(sg)
+
     return (
         get_activity_formatted_string(activities)
         + "---\n"
-        + get_goals_formatted_string(goals)
+        + get_goals_formatted_string(goals, subgoal_map)
     )
 
 
@@ -171,7 +194,7 @@ def group_by_days(activities):
 # TODO: better error handling when this fails
 def activity_from_chat(chat):
     oai_response = openai_client.chat.completions.create(
-        model="gpt-4",
+        model=GPT_MODEL,
         temperature=TEMPERATURE,
         messages=[
             {
@@ -295,12 +318,16 @@ def add_activity():
         )
 
         goals = Goal.query.filter_by(user_id=request.user_id).all()
+        subgoals = Subgoal.query.filter(
+            Subgoal.goal_id.in_([g.goal_id for g in goals]),
+            Subgoal.user_id == request.user_id,
+        )
 
-        activities_and_goals = format_activities_and_goals(activities, goals)
+        activities_and_goals = format_activities_and_goals(activities, goals, subgoals)
 
         ethos = get_ethos()
         oai_response = openai_client.chat.completions.create(
-            model="gpt-4",
+            model=GPT_MODEL,
             temperature=TEMPERATURE,
             messages=[
                 {
@@ -336,12 +363,16 @@ def get_summary():
     ).all()
 
     goals = Goal.query.filter_by(user_id=request.user_id).all()
+    subgoals = Subgoal.query.filter(
+        Subgoal.goal_id.in_([g.goal_id for g in goals]),
+        Subgoal.user_id == request.user_id,
+    )
 
-    activities_and_goals = format_activities_and_goals(activities, goals)
+    activities_and_goals = format_activities_and_goals(activities, goals, subgoals)
 
     ethos = get_ethos()
     oai_response = openai_client.chat.completions.create(
-        model="gpt-4",
+        model=GPT_MODEL,
         temperature=TEMPERATURE,
         messages=[
             {
@@ -369,7 +400,7 @@ def tune():
 
     def get_oai_response(request, prompt):
         oai_response = openai_client.chat.completions.create(
-            model="gpt-4",
+            model=GPT_MODEL,
             temperature=TEMPERATURE,
             messages=[
                 {
@@ -410,6 +441,24 @@ def tune():
     except Exception as e:
         print(e)
         response["message"] = "There was an error updating the ethos: " + str(e)
+
+    return jsonify(response)
+
+
+@app.route("/reset-tune", methods=["POST"])
+@authenticate
+def reset_tune():
+    ethos = Ethos.query.filter_by(user_id=request.user_id).all()
+    for e in ethos:
+        db.session.delete(e)
+
+    response = {}
+    try:
+        db.session.commit()
+        response["message"] = "Ethos reset successfully"
+    except Exception as e:
+        print(e)
+        response["message"] = "There was an error deleting the ethos: " + str(e)
 
     return jsonify(response)
 
@@ -457,6 +506,79 @@ def delete_goal():
         print(e)
 
     return jsonify({"message": "success"})
+
+
+# for testing random system prompts and such
+@app.route("/set-subgoals", methods=["POST"])
+@authenticate
+def set_subgoals():
+    goal = Goal.query.filter_by(
+        user_id=request.user_id, name=request.json["name"]
+    ).first()
+
+    if goal is None:
+        return jsonify(
+            {"message": f'Error: Goal {request.json["name"]} does not exist'}
+        )
+
+    oai_response = openai_client.chat.completions.create(
+        model=GPT_MODEL,
+        temperature=TEMPERATURE,
+        messages=[
+            {
+                "role": "system",
+                "content": "you're a world class coach--of everything. You are opinionated, obsessively creative, and _always_ know exactly what to do in order to achieve a client's goal. Your solutions are _concise_--they never do more than is needed--and are exceedingly precise--they are composed of _very specific_ subtasks that get to the core of the problem and address it entirely. Your words are inspiring and creative. Your guidance is actionable and precise. In this chat, you will be given a goal--you're job is to provide an expertly guided, actionable list of steps to take to accomplish that goal. The client should _never_ walk away with any possible questions on what to do. Distill your list into 5 key points into a JSON array, each object having fields 'name' and a detailed 'description'. Ensure your response is plaintext, without markdown formatting.",
+            },
+            {
+                "role": "user",
+                "content": f"{goal.name} -- {goal.description}",
+            },
+        ],
+    )
+
+    subgoals = [
+        Subgoal(
+            user_id=request.user_id,
+            goal_id=goal.goal_id,
+            name=sg["name"],
+            description=sg["description"],
+        )
+        for sg in json.loads(oai_response.choices[0].message.content)
+    ]
+
+    existing_subgoals = Subgoal.query.filter_by(
+        user_id=request.user_id, goal_id=goal.goal_id
+    ).all()
+    for esg in existing_subgoals:
+        db.session.delete(esg)
+
+    db.session.add_all(subgoals)
+
+    response = {}
+    try:
+        db.session.commit()
+        response["message"] = "Subgoals updated successfully"
+    except Exception as e:
+        print(e)
+        response["message"] = "There was an error updating the subgoals: " + str(e)
+
+    return jsonify(response)
+
+
+@app.route("/get-subgoals", methods=["GET"])
+@authenticate
+def get_subgoals():
+    goal_name = request.args.get("name")
+    goal = Goal.query.filter_by(user_id=request.user_id, name=goal_name).first()
+
+    if goal is None:
+        return jsonify({"message": f"Error: Goal {goal_name} does not exist"})
+
+    subgoals = Subgoal.query.filter_by(
+        user_id=request.user_id, goal_id=goal.goal_id
+    ).all()
+
+    return jsonify([{"name": g.name, "description": g.description} for g in subgoals])
 
 
 @app.route("/")

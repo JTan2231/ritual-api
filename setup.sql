@@ -38,3 +38,14 @@ create table if not exists goal (
     constraint fk_user_goal foreign key (user_id) references user(user_id),
     constraint uc_user_id_name unique (user_id, name)
 );
+
+create table if not exists subgoal (
+    subgoal_id int auto_increment primary key,
+    goal_id int not null,
+    user_id int not null,
+    name varchar(256) not null,
+    description varchar(4096) not null,
+
+    constraint fk_user_subgoal foreign key (user_id) references user(user_id),
+    constraint subgoal_user_id_name unique (user_id, name)
+);
