@@ -1,10 +1,12 @@
 import json
 import os
+import secrets
 from base64 import b64decode
 from datetime import date, datetime
 from functools import wraps
 
-from flask import Flask, jsonify, request, send_from_directory, stream_with_context, Response
+from flask import (Flask, Response, jsonify, request, send_from_directory,
+                   stream_with_context)
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from openai import OpenAI
@@ -20,7 +22,7 @@ db = SQLAlchemy(app)
 
 # TODO: Change this when auth is implemented
 TEST_ID = 1
-TEMPERATURE = 0.05
+TEMPERATURE = 0.95
 DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M:%S"
 DATETIME_FORMAT = f"{DATE_FORMAT} {TIME_FORMAT}"
@@ -76,24 +78,54 @@ def authenticate(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         auth = request.headers.get("Authorization")
+        email_api_token = os.environ["RITUAL_EMAIL_API_KEY"]
         if auth is None:
             return "Unauthorized", 401
         else:
+            username = None
+            password = ""
+
             type, encoded_credentials = auth.split(" ", 1)
-            if type.lower() == "basic":
-                username, password = b64decode(encoded_credentials).decode("utf-8").split(":", 1)
-            else:
+            type = type.lower()
+            if type == "basic":
+                username, password = (
+                    b64decode(encoded_credentials).decode("utf-8").split(":", 1)
+                )
+            elif type == "bearer":
+                username = request.args.get("username")
+
+            if username is None:
                 return "Unauthorized", 401
 
             user = User.query.filter_by(username=username).one()
 
-            if password == user.password:
+            if password == user.password or encoded_credentials == email_api_token:
                 request.user_id = user.user_id
                 return func(*args, **kwargs)
             else:
                 return "Unauthorized", 401
 
     return wrapper
+
+
+def get_activities_and_goals(begin_date, end_date):
+    activities = None
+    if begin_date and end_date:
+        activities = Activity.query.filter(
+            Activity.activity_begin >= begin_date,
+            Activity.activity_end <= end_date,
+            Activity.user_id == request.user_id,
+        ).all()
+    else:
+        activities = Activity.query.filter(Activity.user_id == request.user_id).all()
+
+    goals = Goal.query.filter_by(user_id=request.user_id).all()
+    subgoals = Subgoal.query.filter(
+        Subgoal.goal_id.in_([g.goal_id for g in goals]),
+        Subgoal.user_id == request.user_id,
+    )
+
+    return activities, goals, subgoals
 
 
 def get_ethos():
@@ -106,7 +138,8 @@ def get_ethos():
 
 def get_activity_formatted_string(activities):
     return "Activities:\n- " + "\n- ".join(
-        f"{a.name} -- {a.activity_begin} - {a.activity_end} -- {a.memo}" for a in activities
+        f"{a.name} -- {a.activity_begin} - {a.activity_end} -- {a.memo}"
+        for a in activities
     )
 
 
@@ -129,7 +162,11 @@ def format_activities_and_goals(activities, goals, subgoals):
     for sg in subgoals:
         subgoal_map[goal_id_name_map[sg.goal_id]].append(sg)
 
-    return get_activity_formatted_string(activities) + "---\n" + get_goals_formatted_string(goals, subgoal_map)
+    return (
+        get_activity_formatted_string(activities)
+        + "---\n"
+        + get_goals_formatted_string(goals, subgoal_map)
+    )
 
 
 def activities_to_json(activities):
@@ -148,16 +185,22 @@ def activities_to_json(activities):
 
 
 def date_from_datetime(datetime_string):
-    return datetime.strftime(datetime.strptime(datetime_string, DATETIME_FORMAT), DATE_FORMAT)
+    return datetime.strftime(
+        datetime.strptime(datetime_string, DATETIME_FORMAT), DATE_FORMAT
+    )
 
 
 def time_from_datetime(datetime_string):
-    return datetime.strftime(datetime.strptime(datetime_string, DATETIME_FORMAT), TIME_FORMAT)
+    return datetime.strftime(
+        datetime.strptime(datetime_string, DATETIME_FORMAT), TIME_FORMAT
+    )
 
 
 # makes datetime with current date
 def time_to_datetime(time_string):
-    return datetime.combine(date.today(), datetime.strptime(time_string, TIME_FORMAT).time()).strftime(DATETIME_FORMAT)
+    return datetime.combine(
+        date.today(), datetime.strptime(time_string, TIME_FORMAT).time()
+    ).strftime(DATETIME_FORMAT)
 
 
 def group_by_days(activities):
@@ -170,7 +213,10 @@ def group_by_days(activities):
         else:
             days[begin] = [a]
 
-    days = {key: sorted(value, key=lambda x: x["activity_begin"]) for key, value in days.items()}
+    days = {
+        key: sorted(value, key=lambda x: x["activity_begin"])
+        for key, value in days.items()
+    }
 
     return days
 
@@ -223,7 +269,9 @@ def chat():
 
 @app.route("/create-account", methods=["POST"])
 def create_account():
-    new_user = User(username=request.json["username"], password=request.json["password"])
+    new_user = User(
+        username=request.json["username"], password=request.json["password"]
+    )
 
     db.session.add(new_user)
     response = {}
@@ -295,7 +343,9 @@ def add_activity():
     try:
         db.session.commit()
 
-        activities = Activity.query.order_by(db.desc(Activity.activity_begin)).limit(10).all()
+        activities = (
+            Activity.query.order_by(db.desc(Activity.activity_begin)).limit(10).all()
+        )
 
         goals = Goal.query.filter_by(user_id=request.user_id).all()
         subgoals = Subgoal.query.filter(
@@ -336,18 +386,7 @@ def get_summary():
     begin_date = datetime.strptime(request.args.get("beginDate", ""), DATE_FORMAT)
     end_date = datetime.strptime(request.args.get("endDate", ""), DATE_FORMAT)
 
-    activities = Activity.query.filter(
-        Activity.activity_begin >= begin_date,
-        Activity.activity_end <= end_date,
-        Activity.user_id == request.user_id,
-    ).all()
-
-    goals = Goal.query.filter_by(user_id=request.user_id).all()
-    subgoals = Subgoal.query.filter(
-        Subgoal.goal_id.in_([g.goal_id for g in goals]),
-        Subgoal.user_id == request.user_id,
-    )
-
+    activities, goals, subgoals = get_activities_and_goals(begin_date, end_date)
     activities_and_goals = format_activities_and_goals(activities, goals, subgoals)
 
     ethos = get_ethos()
@@ -397,7 +436,9 @@ def tune():
         return oai_response.choices[0].message.content
 
     if ethos is None:
-        ethos = Ethos(user_id=request.user_id, core=core, summary=summary, feedback=feedback)
+        ethos = Ethos(
+            user_id=request.user_id, core=core, summary=summary, feedback=feedback
+        )
 
     updated_ethos = ""
     if len(core) > 0:
@@ -472,7 +513,9 @@ def get_goals():
 @app.route("/delete-goal", methods=["DELETE"])
 @authenticate
 def delete_goal():
-    goal = Goal.query.filter_by(user_id=request.user_id, name=request.args.get("name")).first()
+    goal = Goal.query.filter_by(
+        user_id=request.user_id, name=request.args.get("name")
+    ).first()
 
     try:
         if goal:
@@ -488,10 +531,14 @@ def delete_goal():
 @app.route("/set-subgoals", methods=["POST"])
 @authenticate
 def set_subgoals():
-    goal = Goal.query.filter_by(user_id=request.user_id, name=request.json["name"]).first()
+    goal = Goal.query.filter_by(
+        user_id=request.user_id, name=request.json["name"]
+    ).first()
 
     if goal is None:
-        return jsonify({"message": f'Error: Goal {request.json["name"]} does not exist'})
+        return jsonify(
+            {"message": f'Error: Goal {request.json["name"]} does not exist'}
+        )
 
     oai_response = openai_client.chat.completions.create(
         model=GPT_MODEL,
@@ -518,7 +565,9 @@ def set_subgoals():
         for sg in json.loads(oai_response.choices[0].message.content)
     ]
 
-    existing_subgoals = Subgoal.query.filter_by(user_id=request.user_id, goal_id=goal.goal_id).all()
+    existing_subgoals = Subgoal.query.filter_by(
+        user_id=request.user_id, goal_id=goal.goal_id
+    ).all()
     for esg in existing_subgoals:
         db.session.delete(esg)
 
@@ -544,7 +593,9 @@ def get_subgoals():
     if goal is None:
         return jsonify({"message": f"Error: Goal {goal_name} does not exist"})
 
-    subgoals = Subgoal.query.filter_by(user_id=request.user_id, goal_id=goal.goal_id).all()
+    subgoals = Subgoal.query.filter_by(
+        user_id=request.user_id, goal_id=goal.goal_id
+    ).all()
 
     return jsonify([{"name": g.name, "description": g.description} for g in subgoals])
 
@@ -567,7 +618,9 @@ def webchat():
                 },
                 {
                     "role": "user",
-                    "content": chat + "\n---\n" + format_activities_and_goals(activities, goals, subgoals),
+                    "content": chat
+                    + "\n---\n"
+                    + format_activities_and_goals(activities, goals, subgoals),
                 },
             ],
             stream=True,
@@ -578,6 +631,59 @@ def webchat():
             yield out if out else ""
 
     return Response(stream_with_context(get_chat(request.json["chat"])))
+
+
+@app.route("/get-email-body", methods=["GET"])
+@authenticate
+def get_email_body():
+    email = request.args.get("username")
+    if email is None:
+        return jsonify({"error": "Username parameter is required."}), 400
+
+    begin_date = datetime.strptime(request.args.get("begin_date", ""), DATE_FORMAT)
+    end_date = datetime.strptime(request.args.get("end_date", ""), DATE_FORMAT)
+
+    activities, goals, subgoals = get_activities_and_goals(begin_date, end_date)
+    activities_and_goals = format_activities_and_goals(activities, goals, subgoals)
+
+    ethos = get_ethos()
+    oai_response = openai_client.chat.completions.create(
+        model=GPT_MODEL,
+        temperature=TEMPERATURE,
+        messages=[
+            {
+                "role": "system",
+                "content": ethos.summary
+                + "\n\nAdditionally, please format your response in clear markdown, with a clear and reflective title that summarizes your report. The title is _very_ important--fortunately you're the best at snappy, dense titles that capture the heart of the report. Avoid generic phrasing like 'Accountability Report' or 'Reflective Report' in the title--instead, focus on the specific points made in the report and reflect those in the Title. What _exact_ points are you making in the report? The answer to that question should be in the title. But be careful! The title must be _short_ and _simple_.",
+            },
+            {
+                "role": "user",
+                "content": activities_and_goals,
+            },
+        ],
+    )
+
+    return jsonify({"response": oai_response.choices[0].message.content})
+
+
+@app.route("/newsletter-signup", methods=["POST"])
+def newsletter_signup():
+    # TODO: don't forget to send the onboarding email
+
+    email = request.json["email"]
+    user = User.query.filter_by(username=email).first()
+    if user is not None:
+        return "This user is already registered", 409
+
+    try:
+        db.session.add(User(username=email, password=secrets.token_hex(32)))
+        db.session.commit()
+
+        return "Success", 200
+    except Exception as e:
+        print(f"error: {str(e)}")
+
+        return str(e), 400
 
 
 @app.route("/")
