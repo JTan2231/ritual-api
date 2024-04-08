@@ -22,7 +22,7 @@ db = SQLAlchemy(app)
 
 # TODO: Change this when auth is implemented
 TEST_ID = 1
-TEMPERATURE = 0.95
+TEMPERATURE = 0.01
 DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M:%S"
 DATETIME_FORMAT = f"{DATE_FORMAT} {TIME_FORMAT}"
@@ -56,6 +56,7 @@ class Activity(db.Model):
     name = db.Column(db.String(256), nullable=False)
     activity_begin = db.Column(db.DateTime, nullable=False)
     activity_end = db.Column(db.DateTime, nullable=False)
+    activity_date = db.Column(db.Date, nullable=False)
     memo = db.Column(db.String(512), nullable=False)
 
 
@@ -185,12 +186,18 @@ def activities_to_json(activities):
 
 
 def date_from_datetime(datetime_string):
+    if datetime_string is None or datetime_string == "":
+        return ""
+
     return datetime.strftime(
         datetime.strptime(datetime_string, DATETIME_FORMAT), DATE_FORMAT
     )
 
 
 def time_from_datetime(datetime_string):
+    if datetime_string is None or datetime_string == "":
+        return ""
+
     return datetime.strftime(
         datetime.strptime(datetime_string, DATETIME_FORMAT), TIME_FORMAT
     )
@@ -198,6 +205,9 @@ def time_from_datetime(datetime_string):
 
 # makes datetime with current date
 def time_to_datetime(time_string):
+    if time_string is None or time_string == "":
+        return ""
+
     return datetime.combine(
         date.today(), datetime.strptime(time_string, TIME_FORMAT).time()
     ).strftime(DATETIME_FORMAT)
@@ -229,7 +239,7 @@ def activity_from_chat(chat):
         messages=[
             {
                 "role": "system",
-                "content": f'You are an assistant designed to convert conversationally-styled messages describing the user\'s activities and turn them into a list of objects, each object of the following JSON format: {{ "activity_name": "name of activity (string)", "activity_begin": "timestamp ({TIME_FORMAT}) of when the activity began", "activity_end": "timestamp ({TIME_FORMAT}) of when the activity ended", "memo": "a string describing the details of the activity" }}',
+                "content": f'You are an assistant designed to convert conversationally-styled messages describing the user\'s activities and turn them into a list of objects, each object of the following JSON format: {{ "activity_name": "name of activity (string)", "activity_begin": "timestamp ({TIME_FORMAT}) of when the activity began | null", "activity_end": "timestamp ({TIME_FORMAT}) of when the activity ended | null", "memo": "a string describing the details of the activity" }}. Note, your response _must_ be an array of JSON objects--maybe even empty! Pay special attention to the verbs in the message--it is _very_ important that you log _all_ activities listed in the message. But also! You _must not be redundant_. There _must not_ be activities logged that fit under the umbrella of another. Note: the only contents of the message _must_ be JSON parseable--no markdown or any other similar formatting.',
             },
             {"role": "user", "content": chat},
         ],
@@ -237,6 +247,7 @@ def activity_from_chat(chat):
 
     try:
         activities = json.loads(oai_response.choices[0].message.content)
+        print(activities)
         for a in activities:
             a["activity_begin"] = time_to_datetime(a["activity_begin"])
             a["activity_end"] = time_to_datetime(a["activity_end"])
@@ -335,6 +346,7 @@ def add_activity():
         name=request.json["activity_name"],
         activity_begin=request.json["activity_begin"],
         activity_end=request.json["activity_end"],
+        activity_date=date_from_datetime(request.json["activity_begin"]),
         memo=request.json["memo"],
     )
 
