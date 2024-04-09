@@ -763,14 +763,17 @@ def email_log_activities():
 
     today = datetime.now().strftime("%Y-%m-%d")
 
+    def sanitize_date(date):
+        return date if len(date) > 0 else None
+
     activities = activity_from_chat(html_content)
     for a in activities:
         db.session.add(
             Activity(
                 user_id=request.user_id,
                 name=a["activity_name"],
-                activity_begin=a["activity_begin"],
-                activity_end=a["activity_end"],
+                activity_begin=sanitize_date(a["activity_begin"]),
+                activity_end=sanitize_date(a["activity_end"]),
                 activity_date=today,
                 memo=a["memo"],
             )
