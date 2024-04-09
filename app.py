@@ -82,6 +82,8 @@ class Subgoal(db.Model):
 
 # TODO: I _think_ this handles both API tokens + username/password auth
 #       verify this?
+#       ...
+#       what does this do beyond username/password???
 def authenticate(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -108,6 +110,38 @@ def authenticate(func):
             user = User.query.filter_by(username=username).one()
 
             if password == user.password or encoded_credentials == email_api_token:
+                request.user_id = user.user_id
+                return func(*args, **kwargs)
+            else:
+                return "Unauthorized", 401
+
+    return wrapper
+
+
+# for actions performed through email
+# POST requests _only_
+# `username` must be included in the JSON body of the request
+def email_auth(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        auth = request.headers.get("Authorization")
+        email_api_token = os.environ["RITUAL_EMAIL_API_KEY"]
+        if auth is None:
+            return "Unauthorized", 401
+        else:
+            username = None
+
+            type, encoded_credentials = auth.split(" ", 1)
+            type = type.lower()
+            if type == "bearer":
+                username = request.json["username"]
+
+            if username is None:
+                return "Unauthorized", 401
+
+            user = User.query.filter_by(username=username).one()
+
+            if encoded_credentials == email_api_token:
                 request.user_id = user.user_id
                 return func(*args, **kwargs)
             else:
@@ -706,7 +740,7 @@ def newsletter_signup():
 
 
 @app.route("/email-log-activities", methods=["POST"])
-@authenticate
+@email_auth
 def email_log_activities():
     msg = BytesParser(policy=policy.default).parsebytes(
         request.json["email_data"].encode("utf-8")
