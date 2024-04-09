@@ -1,10 +1,14 @@
 import json
 import os
+import pprint
 import secrets
 from base64 import b64decode
 from datetime import date, datetime
+from email import policy
+from email.parser import BytesParser
 from functools import wraps
 
+import boto3
 from flask import (Flask, Response, jsonify, request, send_from_directory,
                    stream_with_context)
 from flask_cors import CORS
@@ -12,6 +16,7 @@ from flask_sqlalchemy import SQLAlchemy
 from openai import OpenAI
 
 openai_client = OpenAI()
+ses_client = boto3.client("sesv2")
 
 app = Flask(__name__, static_folder="build", static_url_path="/")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["RITUAL_DB_URL"]
@@ -75,6 +80,8 @@ class Subgoal(db.Model):
     description = db.Column(db.String(4096), nullable=False)
 
 
+# TODO: I _think_ this handles both API tokens + username/password auth
+#       verify this?
 def authenticate(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -694,6 +701,83 @@ def newsletter_signup():
         return "Success", 200
     except Exception as e:
         print(f"error: {str(e)}")
+
+        return str(e), 400
+
+
+@app.route("/email-log-activities", methods=["POST"])
+@authenticate
+def email_log_activities():
+    msg = BytesParser(policy=policy.default).parsebytes(
+        request.json["email_data"].encode("utf-8")
+    )
+
+    deliverer = request.json["username"]
+
+    html_content = ""
+
+    # Extract HTML content
+    if msg.is_multipart():
+        for part in msg.walk():
+            # Check if the part is an HTML content
+            if part.get_content_type() == "text/html":
+                html_content += part.get_content()
+    else:
+        # In case the email is not multipart, but is HTML directly
+        if msg.get_content_type() == "text/html":
+            html_content += msg.get_content()
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    activities = activity_from_chat(html_content)
+    for a in activities:
+        db.session.add(
+            Activity(
+                user_id=request.user_id,
+                name=a["activity_name"],
+                activity_begin=a["activity_begin"],
+                activity_end=a["activity_end"],
+                activity_date=today,
+                memo=a["memo"],
+            )
+        )
+
+    try:
+        db.session.commit()
+
+        ses_client.send_email(
+            FromEmailAddress="ritual@joeytan.dev",
+            Destination={"ToAddresses": [deliverer]},
+            Content={
+                "Simple": {
+                    "Subject": {"Data": f"{today} Activities Logged"},
+                    "Body": {
+                        "Text": {
+                            "Data": f"Logged the following activities:\n{pprint.pformat(activities)}"
+                        }
+                    },
+                }
+            },
+        )
+
+        return jsonify({"message": "Success", "activities": activities})
+    except Exception as e:
+        print(f"error: {str(e)}")
+
+        ses_client.send_email(
+            FromEmailAddress="ritual@joeytan.dev",
+            Destination={"ToAddresses": [deliverer, "j.tan2231@gmail.com"]},
+            Content={
+                "Simple": {
+                    "Subject": {"Data": "Error Logging Activities"},
+                    "Body": {
+                        "Text": {
+                            "Data": f"The followed activities failed to log:\n{pprint.pformat(activities)}\n\nError: {str(e)}\n\Email content:\n{html_content}"
+                        }
+                    },
+                }
+            },
+        )
 
         return str(e), 400
 
