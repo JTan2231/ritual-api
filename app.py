@@ -9,6 +9,7 @@ from email.parser import BytesParser
 from functools import wraps
 
 import boto3
+import markdown
 from flask import (Flask, Response, jsonify, request, send_from_directory,
                    stream_with_context)
 from flask_cors import CORS
@@ -686,6 +687,7 @@ def webchat():
     return Response(stream_with_context(get_chat(request.json["chat"])))
 
 
+# TODO: is this needed?
 @app.route("/get-email-body", methods=["GET"])
 @authenticate
 def get_email_body():
@@ -782,6 +784,35 @@ def email_log_activities():
     try:
         db.session.commit()
 
+        activities = (
+            Activity.query.order_by(db.desc(Activity.activity_begin)).limit(20).all()
+        )
+
+        goals = Goal.query.filter_by(user_id=request.user_id).all()
+        subgoals = Subgoal.query.filter(
+            Subgoal.goal_id.in_([g.goal_id for g in goals]),
+            Subgoal.user_id == request.user_id,
+        )
+
+        activities_and_goals = format_activities_and_goals(activities, goals, subgoals)
+
+        ethos = get_ethos()
+        oai_response = openai_client.chat.completions.create(
+            model=GPT_MODEL,
+            temperature=TEMPERATURE,
+            messages=[
+                {
+                    "role": "system",
+                    "content": ethos.feedback
+                    + f"\n\nPlease note that the latest {len(activities)} are those you should consider. Additionally, please format your feedback in clear markdown.",
+                },
+                {
+                    "role": "user",
+                    "content": activities_and_goals,
+                },
+            ],
+        )
+
         ses_client.send_email(
             FromEmailAddress="ritual@joeytan.dev",
             Destination={"ToAddresses": [deliverer]},
@@ -790,7 +821,9 @@ def email_log_activities():
                     "Subject": {"Data": f"{today} Activities Logged"},
                     "Body": {
                         "Text": {
-                            "Data": f"Logged the following activities:\n{pprint.pformat(activities)}"
+                            "Data": markdown.markdown(
+                                oai_response.choices[0].message.content
+                            )
                         }
                     },
                 }
