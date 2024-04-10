@@ -830,7 +830,7 @@ def email_log_activities():
             },
         )
 
-        return jsonify({"message": "Success", "activities": activities})
+        return "success", 200
     except Exception as e:
         print(f"error: {str(e)}")
 
