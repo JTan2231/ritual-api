@@ -785,7 +785,13 @@ def email_log_activities():
         db.session.commit()
 
         activities = (
-            Activity.query.order_by(db.desc(Activity.activity_begin)).limit(20).all()
+            Activity.query.order_by(
+                SQLAlchemy.func.date(Activity.activity_date),
+                SQLAlchemy.case([(Activity.activity_begin is None, 0)], else_=1),
+                SQLAlchemy.desc(Activity.activity_begin),
+            )
+            .limit(20)
+            .all()
         )
 
         goals = Goal.query.filter_by(user_id=request.user_id).all()
