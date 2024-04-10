@@ -786,9 +786,9 @@ def email_log_activities():
 
         activities = (
             Activity.query.order_by(
-                SQLAlchemy.desc(Activity.activity_date),
-                SQLAlchemy.case([(Activity.activity_begin is None, 0)], else_=1),
-                SQLAlchemy.desc(Activity.activity_begin),
+                db.desc(Activity.activity_date),
+                db.case([(Activity.activity_begin is None, 0)], else_=1),
+                db.desc(Activity.activity_begin),
             )
             .limit(20)
             .all()
