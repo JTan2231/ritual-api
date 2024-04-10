@@ -768,8 +768,8 @@ def email_log_activities():
     def sanitize_date(date):
         return date if len(date) > 0 else None
 
-    activities = activity_from_chat(html_content)
-    for a in activities:
+    activity_json = activity_from_chat(html_content)
+    for a in activity_json:
         db.session.add(
             Activity(
                 user_id=request.user_id,
@@ -785,13 +785,7 @@ def email_log_activities():
         db.session.commit()
 
         activities = (
-            Activity.query.order_by(
-                db.desc(Activity.activity_date),
-                db.case([(Activity.activity_begin is None, 0)], else_=1),
-                db.desc(Activity.activity_begin),
-            )
-            .limit(20)
-            .all()
+            Activity.query.order_by(db.desc(Activity.activity_begin)).limit(20).all()
         )
 
         goals = Goal.query.filter_by(user_id=request.user_id).all()
@@ -810,7 +804,7 @@ def email_log_activities():
                 {
                     "role": "system",
                     "content": ethos.feedback
-                    + f"\n\nPlease note that the latest {len(activities)} are those you should consider. Additionally, please format your feedback in clear markdown.",
+                    + f"\n\nPlease note that the only activities you need to consider are {activity_json}--everything else is just context. Additionally, please format your feedback in clear markdown.",
                 },
                 {
                     "role": "user",
