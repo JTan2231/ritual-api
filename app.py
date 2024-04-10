@@ -820,7 +820,7 @@ def email_log_activities():
                 "Simple": {
                     "Subject": {"Data": f"{today} Activities Logged"},
                     "Body": {
-                        "Text": {
+                        "Html": {
                             "Data": markdown.markdown(
                                 oai_response.choices[0].message.content
                             )
