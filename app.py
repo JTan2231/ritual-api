@@ -952,7 +952,10 @@ def email_log_activities():
         db.session.commit()
 
         activities = (
-            Activity.query.order_by(db.desc(Activity.activity_begin)).limit(20).all()
+            Activity.query.order_by(db.desc(Activity.activity_begin))
+            .filter_by(user_id=request.user_id)
+            .limit(20)
+            .all()
         )
 
         goals = Goal.query.filter_by(user_id=request.user_id).all()
