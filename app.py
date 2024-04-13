@@ -1,6 +1,7 @@
 import json
 import os
 import pprint
+import re
 import secrets
 from base64 import b64decode
 from datetime import date, datetime
@@ -33,7 +34,7 @@ DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M:%S"
 DATETIME_FORMAT = f"{DATE_FORMAT} {TIME_FORMAT}"
 
-GPT_MODEL = "gpt-4-0125-preview"
+GPT_MODEL = "gpt-4-turbo"
 
 
 class EthosDefault:
@@ -298,6 +299,29 @@ def activity_from_chat(chat):
     except Exception as e:
         print(oai_response)
         print("error parsing OAI response: " + str(e))
+        return {}
+
+
+def goals_from_chat(chat):
+    oai_response = openai_client.chat.completions.create(
+        model=GPT_MODEL,
+        temperature=TEMPERATURE,
+        messages=[
+            {
+                "role": "system",
+                "content": f'You are an expert assistant designed to convert conversationally-styled messages describing the user\'s goals and turn them into a list of objects, each object of the following JSON format: {{ "name": "string", "description": "string" }}. Note, your response _must_ be an array of JSON objects--maybe even empty! Pay special attention to the verbs in the message--it is _very_ important that you log _all_ goals listed in the message. But also! You _must not be redundant_. There _must not_ be goals logged that fit under the umbrella of another. Note: the only contents of the message _must_ be JSON parseable--no markdown or any other similar formatting. Please note: the chat you receive may be a reply to the email--be careful! You must _only_ pay attention to the replying email--do not pay any mind to the email that is being replied to.',
+            },
+            {"role": "user", "content": chat},
+        ],
+    )
+
+    try:
+        goals = json.loads(oai_response.choices[0].message.content)
+
+        return goals
+    except Exception as e:
+        print(oai_response)
+        print("goals_from_chat: error parsing OAI response: " + str(e))
         return {}
 
 
@@ -581,19 +605,7 @@ def delete_goal():
     return jsonify({"message": "success"})
 
 
-# for testing random system prompts and such
-@app.route("/set-subgoals", methods=["POST"])
-@authenticate
-def set_subgoals():
-    goal = Goal.query.filter_by(
-        user_id=request.user_id, name=request.json["name"]
-    ).first()
-
-    if goal is None:
-        return jsonify(
-            {"message": f'Error: Goal {request.json["name"]} does not exist'}
-        )
-
+def generate_subgoals(goal):
     oai_response = openai_client.chat.completions.create(
         model=GPT_MODEL,
         temperature=TEMPERATURE,
@@ -609,7 +621,7 @@ def set_subgoals():
         ],
     )
 
-    subgoals = [
+    return [
         Subgoal(
             user_id=request.user_id,
             goal_id=goal.goal_id,
@@ -618,6 +630,22 @@ def set_subgoals():
         )
         for sg in json.loads(oai_response.choices[0].message.content)
     ]
+
+
+# for testing random system prompts and such
+@app.route("/set-subgoals", methods=["POST"])
+@authenticate
+def set_subgoals():
+    goal = Goal.query.filter_by(
+        user_id=request.user_id, name=request.json["name"]
+    ).first()
+
+    if goal is None:
+        return jsonify(
+            {"message": f'Error: Goal {request.json["name"]} does not exist'}
+        )
+
+    subgoals = generate_subgoals(goal)
 
     existing_subgoals = Subgoal.query.filter_by(
         user_id=request.user_id, goal_id=goal.goal_id
@@ -721,6 +749,50 @@ def get_email_body():
     return jsonify({"response": oai_response.choices[0].message.content})
 
 
+def get_html_from_email(email_content):
+    html_content = ""
+
+    if email_content.is_multipart():
+        for part in email_content.walk():
+            if part.get_content_type() == "text/html":
+                html_content += part.get_content()
+    else:
+        if email_content.get_content_type() == "text/html":
+            html_content += email_content.get_content()
+
+    return html_content
+
+
+# shorthand for the `ses_client.send_email` function
+def send_email(subject, html_content, recipient):
+    print(
+        ses_client.send_email(
+            FromEmailAddress="ritual@joeytan.dev",
+            Destination={"ToAddresses": [recipient]},
+            Content={
+                "Simple": {
+                    "Subject": {"Data": subject},
+                    "Body": {"Html": {"Data": html_content}},
+                }
+            },
+        )
+    )
+
+
+def send_error_email(subject, failed_objects, error, email_content, recipient):
+    send_email(
+        subject,
+        f"The following goals/subgoals failed to log:\n{pprint.pformat(failed_objects)}\n\nError: {str(error)}\n\Email content:\n{email_content}",
+        recipient,
+    )
+
+    send_email(
+        subject,
+        f"The following goals/subgoals failed to log:\n{pprint.pformat(failed_objects)}\n\nError: {str(error)}\n\Email content:\n{email_content}",
+        "j.tan2231@gmail.com",
+    )
+
+
 @app.route("/newsletter-signup", methods=["POST"])
 def newsletter_signup():
     # TODO: don't forget to send the onboarding email
@@ -734,9 +806,115 @@ def newsletter_signup():
         db.session.add(User(username=email, password=secrets.token_hex(32)))
         db.session.commit()
 
+        with open("onboarding.html", "r") as f:
+            ses_client.send_email(
+                FromEmailAddress="ritual@joeytan.dev",
+                Destination={"ToAddresses": [email]},
+                Content={
+                    "Simple": {
+                        "Subject": {"Data": "Welcome to Ritual!"},
+                        "Body": {"Html": {"Data": f.read()}},
+                    }
+                },
+                ReplyToAddresses=["ritual@joeytan.dev"],
+            )
+
         return "Success", 200
     except Exception as e:
         print(f"error: {str(e)}")
+
+        return str(e), 400
+
+
+# NOTE: This resets the user's goals--will this be a permanent feature?
+@app.route("/onboarding", methods=["POST"])
+@email_auth
+def onboarding():
+    def extract_latest_message(email_data):
+        msg = BytesParser(policy=policy.default).parsebytes(email_data)
+
+        def find_latest_text_part(message):
+            if message.is_multipart():
+                for part in reversed(message.get_payload()):
+                    text = find_latest_text_part(part)
+                    if text:
+                        return text
+            else:
+                if message.get_content_type() == "text/html":
+                    return message.get_payload(decode=True).decode("utf-8")
+
+            return None
+
+        return find_latest_text_part(msg)
+
+    existing_goals = (
+        Goal.query.filter_by(user_id=request.user_id).all()
+        + Subgoal.query.filter_by(user_id=request.user_id).all()
+    )
+    for eg in existing_goals:
+        db.session.delete(eg)
+
+    if len(existing_goals) > 0:
+        db.session.commit()
+
+    html_content = extract_latest_message(request.json["email_data"].encode("utf-8"))
+
+    onboarding_tag = r'id=".*onboarding_tag.*"'
+    match = re.search(onboarding_tag, html_content)
+    if match is None:
+        # TODO: Better error handling
+        return "Error: missing onboarding tag", 400
+
+    html_content = html_content[: match.start()]
+    deliverer = request.json["username"]
+
+    creation_receipt = []
+    goal_json = goals_from_chat(html_content)
+
+    goals = []
+    for g in goal_json:
+        goal = Goal(
+            user_id=request.user_id,
+            name=g["name"],
+            description=g["description"],
+        )
+
+        goals.append(goal)
+        db.session.add(goal)
+
+    db.session.commit()
+
+    for goal in goals:
+        subgoals = generate_subgoals(goal)
+
+        creation_receipt.append({"goal": goal, "subgoals": subgoals})
+        db.session.add_all(subgoals)
+
+    try:
+        db.session.commit()
+
+        response = '<div style="max-width: 600px;">'
+        response += "<h1>New Goals Set</h1>"
+        for g in creation_receipt:
+            goal = g["goal"]
+            subgoals = g["subgoals"]
+            response += f"<h2>{goal.name} -- {goal.description}</h2><ul>"
+            for sg in subgoals:
+                response += f'<li style="margin-bottom: 0.5rem"><b>{sg.name}</b> -- {sg.description}'
+
+            response += "</ul>"
+
+        response += "</div>"
+
+        send_email("New Goals Set", markdown.markdown(response), deliverer)
+
+        return "success", 200
+    except Exception as e:
+        print(f"error: {str(e)}")
+
+        send_error_email(
+            "Error Setting Goals", creation_receipt, e, html_content, deliverer
+        )
 
         return str(e), 400
 
@@ -749,28 +927,15 @@ def email_log_activities():
     )
 
     deliverer = request.json["username"]
-
-    html_content = ""
-
-    # Extract HTML content
-    if msg.is_multipart():
-        for part in msg.walk():
-            # Check if the part is an HTML content
-            if part.get_content_type() == "text/html":
-                html_content += part.get_content()
-    else:
-        # In case the email is not multipart, but is HTML directly
-        if msg.get_content_type() == "text/html":
-            html_content += msg.get_content()
-
+    html_content = get_html_from_email(msg)
     today = datetime.now().strftime("%Y-%m-%d")
 
     def sanitize_date(date):
         return date if len(date) > 0 else None
 
     activity_json = activity_from_chat(html_content)
-    for a in activity_json:
-        db.session.add(
+    db.session.add_all(
+        [
             Activity(
                 user_id=request.user_id,
                 name=a["activity_name"],
@@ -779,7 +944,9 @@ def email_log_activities():
                 activity_date=today,
                 memo=a["memo"],
             )
-        )
+            for a in activity_json
+        ]
+    )
 
     try:
         db.session.commit()
@@ -797,56 +964,36 @@ def email_log_activities():
         activities_and_goals = format_activities_and_goals(activities, goals, subgoals)
 
         ethos = get_ethos()
+        messages = [
+            {
+                "role": "system",
+                "content": ethos.feedback
+                + f"\n\nPlease note that the only activities you need to consider are {activity_json}--everything else is just context. Additionally, please format your feedback in clear markdown.",
+            },
+            {
+                "role": "user",
+                "content": activities_and_goals,
+            },
+        ]
+
         oai_response = openai_client.chat.completions.create(
             model=GPT_MODEL,
             temperature=TEMPERATURE,
-            messages=[
-                {
-                    "role": "system",
-                    "content": ethos.feedback
-                    + f"\n\nPlease note that the only activities you need to consider are {activity_json}--everything else is just context. Additionally, please format your feedback in clear markdown.",
-                },
-                {
-                    "role": "user",
-                    "content": activities_and_goals,
-                },
-            ],
+            messages=messages,
         )
 
-        ses_client.send_email(
-            FromEmailAddress="ritual@joeytan.dev",
-            Destination={"ToAddresses": [deliverer]},
-            Content={
-                "Simple": {
-                    "Subject": {"Data": f"{today} Activities Logged"},
-                    "Body": {
-                        "Html": {
-                            "Data": markdown.markdown(
-                                oai_response.choices[0].message.content
-                            )
-                        }
-                    },
-                }
-            },
+        send_email(
+            f"{today} Activities Logged",
+            markdown.markdown(oai_response.choices[0].message.content),
+            deliverer,
         )
 
         return "success", 200
     except Exception as e:
         print(f"error: {str(e)}")
 
-        ses_client.send_email(
-            FromEmailAddress="ritual@joeytan.dev",
-            Destination={"ToAddresses": [deliverer, "j.tan2231@gmail.com"]},
-            Content={
-                "Simple": {
-                    "Subject": {"Data": "Error Logging Activities"},
-                    "Body": {
-                        "Text": {
-                            "Data": f"The followed activities failed to log:\n{pprint.pformat(activities)}\n\nError: {str(e)}\n\Email content:\n{html_content}"
-                        }
-                    },
-                }
-            },
+        send_error_email(
+            "Error Logging Activities", activities, e, html_content, deliverer
         )
 
         return str(e), 400
