@@ -950,7 +950,7 @@ def onboarding():
 
             response += "</ul>"
 
-        send_email("New Goals Set", markdown.markdown(response), deliverer)
+        send_email("New Goals Set", response, deliverer)
 
         return "success", 200
     except Exception as e:
