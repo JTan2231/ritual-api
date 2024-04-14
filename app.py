@@ -946,29 +946,22 @@ def email_log_activities():
         return date if len(date) > 0 else None
 
     activity_json = activity_from_chat(html_content)
-    db.session.add_all(
-        [
-            Activity(
-                user_id=request.user_id,
-                name=a["activity_name"],
-                activity_begin=sanitize_date(a["activity_begin"]),
-                activity_end=sanitize_date(a["activity_end"]),
-                activity_date=today,
-                memo=a["memo"],
-            )
-            for a in activity_json
-        ]
-    )
+    activities = [
+        Activity(
+            user_id=request.user_id,
+            name=a["activity_name"],
+            activity_begin=sanitize_date(a["activity_begin"]),
+            activity_end=sanitize_date(a["activity_end"]),
+            activity_date=today,
+            memo=a["memo"],
+        )
+        for a in activity_json
+    ]
+
+    db.session.add_all(activities)
 
     try:
         db.session.commit()
-
-        activities = (
-            Activity.query.order_by(db.desc(Activity.activity_begin))
-            .filter_by(user_id=request.user_id)
-            .limit(len(activity_json))
-            .all()
-        )
 
         goals = Goal.query.filter_by(user_id=request.user_id).all()
         subgoals = Subgoal.query.filter(
