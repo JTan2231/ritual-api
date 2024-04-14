@@ -10,7 +10,7 @@ from email.parser import BytesParser
 from functools import wraps
 
 import boto3
-import markdown
+import markdown2 as markdown
 from flask import (Flask, Response, jsonify, request, send_from_directory,
                    stream_with_context)
 from flask_cors import CORS
@@ -996,6 +996,11 @@ def email_log_activities():
             temperature=TEMPERATURE,
             messages=messages,
         )
+
+        with open("testing.md", "w") as f:
+            f.write(oai_response.choices[0].message.content)
+
+        return "success", 200
 
         send_email(
             f"{today} Activities Logged",
