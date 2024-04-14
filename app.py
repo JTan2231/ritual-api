@@ -40,12 +40,12 @@ GPT_MODEL = "gpt-4-turbo"
 class EthosDefault:
     core = "A friendly, helpful partner focused on the routines, rituals, and personal growth of the user."
 
-    def __init__(self):
-        with open("prompts/feedback.txt", "r") as f:
-            self.feedback = f.read()
 
-        with open("prompts/summary.txt", "r") as f:
-            self.summary = f.read()
+with open("prompts/feedback.txt", "r") as f:
+    EthosDefault.feedback = f.read()
+
+with open("prompts/summary.txt", "r") as f:
+    EthosDefault.summary = f.read()
 
 
 class User(db.Model):
