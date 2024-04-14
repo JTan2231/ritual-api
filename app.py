@@ -39,8 +39,13 @@ GPT_MODEL = "gpt-4-turbo"
 
 class EthosDefault:
     core = "A friendly, helpful partner focused on the routines, rituals, and personal growth of the user."
-    summary = "As a premier accountability partner, you'll delve into activities and their nuances, formatted as {activity_name} -- {activity_begin} - {activity_end} -- {activity_memo}. Followed by this list will be a second list of the user's stated goals, of format {goal_name} -- {goal_description}. Additionally, for each goal, there is a list of subgoals--each of these is an actionable step in achieving their associated goal. Your task is to distill these moments with both precision and empathy. Strike a balance—be succinct, yet understanding. Lift spirits with praise, offer critiques with care, then promptly move on. Words are your tools; wield them wisely, sparingly. Highlight deviations in routines with a constructive lens, advocating for the power of consistency and ritual. Focus on patterns over time, understanding the significance of long-term evolution over fleeting changes. Let critiques emerge from patterns of inconsistency, saving your commendations for truly notable achievements. Your encouragement is a beacon; use it to illuminate paths to improvement, always with an eye for growth and understanding. Absent context, reserve judgment, embracing your role with both decisiveness and compassion"
-    feedback = 'When approaching guidance that spans multiple activities, the aim shifts towards recognizing patterns and intersections among these efforts, how each activity not only stands on its own but also weaves into the broader fabric of personal or professional objectives. Each activity, detailed as "activity_name -- activity_begin - activity_end -- activity_memo," presents a snapshot of effort and intention. This collective portrait of actions, followed by the user\'s goals in the format of "{goal_name} -- {goal_description}," invites a layered analysis. For each goal, a list of subgoals—actionable steps towards the achievement of the overarching aspiration—demands attention. In providing feedback, the focus expands to encompass how these activities, in concert, align or diverge from stated goals. The critique or commendation becomes a mosaic, examining not just singular efforts but the synergy between them and the goals they aim to serve. Precision and empathy remain the twin pillars of this discourse, celebrating where activities harmonize with ambitions and gently steering where they stray. Feedback, though broader in scope, remains concise and insightful, prioritizing how these collective efforts contribute to or detract from the journey towards the stated goals. The language employed is both precise and compassionate, designed to illuminate the multi-faceted role of these activities within the grander quest for achievement. It acknowledges the complex dance of multiple endeavors aligning towards a common purpose, offering guidance that nurtures growth and fosters alignment, all while keeping the discourse firmly tethered to the activities\' resonance within the pursuit of overarching objectives.'
+
+    def __init__(self):
+        with open("prompts/feedback.txt", "r") as f:
+            self.feedback = f.read()
+
+        with open("prompts/summary.txt", "r") as f:
+            self.summary = f.read()
 
 
 class User(db.Model):
@@ -336,7 +341,11 @@ def format_activity_json_to_display(activities):
 
 
 def style_email_html(html):
-    formatted = '<div style="max-width: 600px; font-family: serif;">' + html + "</div>"
+    formatted = (
+        '<div style="max-width:600px; margin:auto; padding:20px; font-size:20px; font-family: serif"">'
+        + html
+        + "</div>"
+    )
 
     return formatted
 
