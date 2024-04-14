@@ -999,7 +999,8 @@ def email_log_activities():
         activities = Activity.query.filter(
             Activity.activity_date.between(
                 today_datetime - timedelta(days=7), today_datetime
-            )
+            ),
+            Activity.user_id == request.user_id,
         ).all()
 
         activities_html = get_activity_html_string(activities)
