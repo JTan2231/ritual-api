@@ -973,11 +973,7 @@ def email_log_activities():
 
         ethos = get_ethos()
         messages = [
-            {
-                "role": "system",
-                "content": ethos.feedback
-                + f"\n\nPlease note that the only activities you need to consider are {activity_json}--everything else is just context. Additionally, please format your feedback in clear markdown.",
-            },
+            {"role": "system", "content": ethos.feedback},
             {
                 "role": "user",
                 "content": activities_and_goals,
@@ -989,11 +985,6 @@ def email_log_activities():
             temperature=TEMPERATURE,
             messages=messages,
         )
-
-        with open("testing.md", "w") as f:
-            f.write(oai_response.choices[0].message.content)
-
-        return "success", 200
 
         send_email(
             f"{today} Activities Logged",
