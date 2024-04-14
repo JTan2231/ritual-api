@@ -940,13 +940,13 @@ def onboarding():
     try:
         db.session.commit()
 
-        response += "<h1>New Goals Set</h1>"
+        response = '<h1 style="font-family: Helvetica;">New Goals Set</h1>'
         for g in creation_receipt:
             goal = g["goal"]
             subgoals = g["subgoals"]
-            response += f"<h2>{goal.name} -- {goal.description}</h2><ul>"
+            response += f'<h2 style="font-family: Helvetica;">{goal.name} -- {goal.description}</h2><ul>'
             for sg in subgoals:
-                response += f'<li style="margin-bottom: 0.5rem"><b>{sg.name}</b> -- {sg.description}'
+                response += f'<li style="margin-bottom: 0.5rem; font-family: serif;"><b>{sg.name}</b> -- {sg.description}'
 
             response += "</ul>"
 
