@@ -335,6 +335,12 @@ def format_activity_json_to_display(activities):
     return grouped
 
 
+def style_email_html(html):
+    formatted = '<div style="max-width: 600px; font-family: serif;">' + html + "</div>"
+
+    return formatted
+
+
 # temporary route; merge this with `add-activity`
 @app.route("/chat", methods=["POST"])
 @authenticate
@@ -772,7 +778,7 @@ def send_email(subject, html_content, recipient):
             Content={
                 "Simple": {
                     "Subject": {"Data": subject},
-                    "Body": {"Html": {"Data": html_content}},
+                    "Body": {"Html": {"Data": style_email_html(html_content)}},
                 }
             },
         )
@@ -893,7 +899,6 @@ def onboarding():
     try:
         db.session.commit()
 
-        response = '<div style="max-width: 600px;">'
         response += "<h1>New Goals Set</h1>"
         for g in creation_receipt:
             goal = g["goal"]
@@ -903,8 +908,6 @@ def onboarding():
                 response += f'<li style="margin-bottom: 0.5rem"><b>{sg.name}</b> -- {sg.description}'
 
             response += "</ul>"
-
-        response += "</div>"
 
         send_email("New Goals Set", markdown.markdown(response), deliverer)
 
