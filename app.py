@@ -966,7 +966,7 @@ def email_log_activities():
         activities = (
             Activity.query.order_by(db.desc(Activity.activity_begin))
             .filter_by(user_id=request.user_id)
-            .limit(20)
+            .limit(len(activity_json))
             .all()
         )
 
