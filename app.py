@@ -4,7 +4,7 @@ import pprint
 import re
 import secrets
 from base64 import b64decode
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from email import policy
 from email.parser import BytesParser
 from functools import wraps
@@ -190,6 +190,29 @@ def get_activity_formatted_string(activities):
         f"{a.name} -- {a.activity_begin} - {a.activity_end} -- {a.memo}"
         for a in activities
     )
+
+
+def get_activity_html_string(activities):
+    days = {}
+    for a in activities:
+        if a.activity_date not in days:
+            days[a.activity_date] = []
+
+        days[a.activity_date].append(a)
+
+    html = '<h1 style="font-family: Helvetica;">Your Past 7 Days</h1>'
+    html += '<div style="font-family: serif;">'
+    for day, day_activities in days.items():
+        html += f'<h2 style="font-family: Helvetica;">{day}</h2>'
+        html += "<ul>"
+        for a in day_activities:
+            html += f"<li><b>{a.name}</b> - {a.memo}"
+
+        html += "</ul>"
+
+    html += "</div>"
+
+    return html
 
 
 # subgoals is a dictionary: { goal.name: subgoal }
@@ -963,32 +986,18 @@ def email_log_activities():
     try:
         db.session.commit()
 
-        goals = Goal.query.filter_by(user_id=request.user_id).all()
-        subgoals = Subgoal.query.filter(
-            Subgoal.goal_id.in_([g.goal_id for g in goals]),
-            Subgoal.user_id == request.user_id,
-        )
+        today_datetime = datetime.strptime(today, DATE_FORMAT)
+        activities = Activity.query.filter(
+            Activity.activity_date.between(
+                today_datetime - timedelta(days=7), today_datetime
+            )
+        ).all()
 
-        activities_and_goals = format_activities_and_goals(activities, goals, subgoals)
-
-        ethos = get_ethos()
-        messages = [
-            {"role": "system", "content": ethos.feedback},
-            {
-                "role": "user",
-                "content": activities_and_goals,
-            },
-        ]
-
-        oai_response = openai_client.chat.completions.create(
-            model=GPT_MODEL,
-            temperature=TEMPERATURE,
-            messages=messages,
-        )
+        activities_html = get_activity_html_string(activities)
 
         send_email(
             f"{today} Activities Logged",
-            markdown.markdown(oai_response.choices[0].message.content),
+            activities_html,
             deliverer,
         )
 
