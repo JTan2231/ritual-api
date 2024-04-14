@@ -996,12 +996,15 @@ def email_log_activities():
         db.session.commit()
 
         today_datetime = datetime.strptime(today, DATE_FORMAT)
-        activities = Activity.query.filter(
-            Activity.activity_date.between(
-                today_datetime - timedelta(days=7), today_datetime
-            ),
-            Activity.user_id == request.user_id,
-        ).all()
+        activities = (
+            Activity.query.filter(
+                Activity.activity_date.between(
+                    today_datetime - timedelta(days=7), today_datetime
+                )
+            )
+            .filter_by(user_id=request.user_id)
+            .all()
+        )
 
         activities_html = get_activity_html_string(activities)
 
