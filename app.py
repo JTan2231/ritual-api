@@ -202,13 +202,22 @@ def get_activity_html_string(activities):
 
     html = '<h1 style="font-family: Helvetica;">Your Past 7 Days</h1>'
     html += '<div style="font-family: serif;">'
-    for day, day_activities in days.items():
-        html += f'<h2 style="font-family: Helvetica;">{day}</h2>'
-        html += "<ul>"
-        for a in day_activities:
-            html += f"<li><b>{a.name}</b> - {a.memo}"
 
-        html += "</ul>"
+    day_lists = []
+    for day, day_activities in days.items():
+        day_html = f'<h2 style="font-family: Helvetica;">{day}</h2>'
+        day_html += "<ul>"
+        for a in day_activities:
+            day_html += f"<li><b>{a.name}</b> - {a.memo}"
+
+        day_html += "</ul>"
+
+        day_lists.append((day, day_html))
+
+    day_lists = sorted(day_lists, key=lambda x: x[0], reverse=True)
+
+    for _, day_html in day_lists:
+        html += day_html
 
     html += "</div>"
 
