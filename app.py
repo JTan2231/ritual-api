@@ -200,7 +200,7 @@ def get_activity_html_string(activities):
 
         days[a.activity_date].append(a)
 
-    html = '<h1 style="font-family: Helvetica;">Your Past 7 Days</h1>'
+    html = '<h1 style="font-family: Helvetica;">Your Activities This Past Week</h1>'
     html += '<div style="font-family: serif;">'
 
     day_lists = []
