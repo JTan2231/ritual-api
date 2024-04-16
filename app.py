@@ -52,6 +52,7 @@ class User(db.Model):
     user_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     username = db.Column(db.String(256), nullable=False, unique=True)
     password = db.Column(db.String(256), nullable=False)
+    active = db.Column(db.Boolean, default=False, nullable=False)
 
 
 class Ethos(db.Model):
@@ -179,6 +180,14 @@ def get_activities_and_goals(begin_date, end_date):
 
 def get_ethos():
     ethos = Ethos.query.filter_by(user_id=request.user_id).first()
+    if ethos is None:
+        ethos = EthosDefault
+
+    return ethos
+
+
+def get_ethos_by_id(user_id):
+    ethos = Ethos.query.filter_by(user_id=user_id).first()
     if ethos is None:
         ethos = EthosDefault
 
@@ -1023,6 +1032,58 @@ def email_log_activities():
         )
 
         return str(e), 400
+
+
+@app.route("/send-newsletters", methods=["POST"])
+@email_auth
+def send_newsletters():
+    end_date = datetime.now()
+    begin_date = end_date - timedelta(days=7)
+
+    users = User.query.filter_by(active=True).all()
+    print(f"sending newsletters to {[u.username for u in users]}")
+    for user in users:
+        activities = Activity.query.filter(
+            Activity.activity_date >= begin_date,
+            Activity.activity_date <= end_date,
+            Activity.user_id == user.user_id,
+        ).all()
+
+        goals = Goal.query.filter_by(user_id=user.user_id).all()
+        subgoals = Subgoal.query.filter(
+            Subgoal.goal_id.in_([g.goal_id for g in goals]),
+            Subgoal.user_id == user.user_id,
+        )
+
+        activities_and_goals = format_activities_and_goals(activities, goals, subgoals)
+
+        ethos = get_ethos()
+        oai_response = openai_client.chat.completions.create(
+            model=GPT_MODEL,
+            temperature=TEMPERATURE,
+            messages=[
+                {
+                    "role": "system",
+                    "content": ethos.summary,
+                },
+                {
+                    "role": "user",
+                    "content": activities_and_goals,
+                },
+            ],
+        )
+
+        html = markdown.markdown(oai_response.choices[0].message.content)
+        for tag in ("<h1>", "<h2>", "<h3>", "<h4>"):
+            html = html.replace(tag, tag[:-1] + ' style="font-family: Helvetica;">')
+
+        send_email(
+            f'Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
+            html,
+            user.username,
+        )
+
+    return "success", 200
 
 
 @app.route("/")
