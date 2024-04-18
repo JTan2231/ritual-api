@@ -119,6 +119,7 @@ def email_auth(func):
 
 def set_user_active(user_id):
     user = User.query.filter_by(user_id=user_id).first()
+    print(f"updating the activity of user '{user.username}'")
     user.active = True
     user.last_active = datetime.now()
 
@@ -206,22 +207,34 @@ def time_to_datetime(time_string):
     ).strftime(DATETIME_FORMAT)
 
 
-# TODO: better error handling when this fails
-def activity_from_chat(chat):
+def openai_prompt(system_prompt, user_prompt):
+    print("prompting gpt...")
     oai_response = openai_client.chat.completions.create(
         model=GPT_MODEL,
         temperature=TEMPERATURE,
         messages=[
             {
                 "role": "system",
-                "content": f'You are an assistant designed to convert conversationally-styled messages describing the user\'s activities and turn them into a list of objects, each object of the following JSON format: {{ "activity_name": "name of activity (string)", "activity_begin": "timestamp ({TIME_FORMAT}) of when the activity began | null", "activity_end": "timestamp ({TIME_FORMAT}) of when the activity ended | null", "memo": "a string describing the details of the activity" }}. Note, your response _must_ be an array of JSON objects--maybe even empty! Pay special attention to the verbs in the message--it is _very_ important that you log _all_ activities listed in the message. But also! You _must not be redundant_. There _must not_ be activities logged that fit under the umbrella of another. Note: the only contents of the message _must_ be JSON parseable--no markdown or any other similar formatting.',
+                "content": system_prompt,
             },
-            {"role": "user", "content": chat},
+            {"role": "user", "content": user_prompt},
         ],
     )
 
+    print(f"prompt finished. usage: {oai_response.usage}")
+
+    return oai_response.choices[0].message.content
+
+
+# TODO: better error handling when this fails
+def activity_from_chat(chat):
+    oai_response = openai_prompt(
+        f'You are an assistant designed to convert conversationally-styled messages describing the user\'s activities and turn them into a list of objects, each object of the following JSON format: {{ "activity_name": "name of activity (string)", "activity_begin": "timestamp ({TIME_FORMAT}) of when the activity began | null", "activity_end": "timestamp ({TIME_FORMAT}) of when the activity ended | null", "memo": "a string describing the details of the activity" }}. Note, your response _must_ be an array of JSON objects--maybe even empty! Pay special attention to the verbs in the message--it is _very_ important that you log _all_ activities listed in the message. But also! You _must not be redundant_. There _must not_ be activities logged that fit under the umbrella of another. Note: the only contents of the message _must_ be JSON parseable--no markdown or any other similar formatting.',
+        chat,
+    )
+
     try:
-        activities = json.loads(oai_response.choices[0].message.content)
+        activities = json.loads(oai_response)
         print(activities)
         for a in activities:
             a["activity_begin"] = time_to_datetime(a["activity_begin"])
@@ -235,20 +248,13 @@ def activity_from_chat(chat):
 
 
 def goals_from_chat(chat):
-    oai_response = openai_client.chat.completions.create(
-        model=GPT_MODEL,
-        temperature=TEMPERATURE,
-        messages=[
-            {
-                "role": "system",
-                "content": f'You are an expert assistant designed to convert conversationally-styled messages describing the user\'s goals and turn them into a list of objects, each object of the following JSON format: {{ "name": "string", "description": "string" }}. Note, your response _must_ be an array of JSON objects--maybe even empty! Pay special attention to the verbs in the message--it is _very_ important that you log _all_ goals listed in the message. But also! You _must not be redundant_. There _must not_ be goals logged that fit under the umbrella of another. Note: the only contents of the message _must_ be JSON parseable--no markdown or any other similar formatting. Please note: the chat you receive may be a reply to the email--be careful! You must _only_ pay attention to the replying email--do not pay any mind to the email that is being replied to.',
-            },
-            {"role": "user", "content": chat},
-        ],
+    oai_response = openai_prompt(
+        f'You are an expert assistant designed to convert conversationally-styled messages describing the user\'s goals and turn them into a list of objects, each object of the following JSON format: {{ "name": "string", "description": "string" }}. Note, your response _must_ be an array of JSON objects--maybe even empty! Pay special attention to the verbs in the message--it is _very_ important that you log _all_ goals listed in the message. But also! You _must not be redundant_. There _must not_ be goals logged that fit under the umbrella of another. Note: the only contents of the message _must_ be JSON parseable--no markdown or any other similar formatting. Please note: the chat you receive may be a reply to the email--be careful! You must _only_ pay attention to the replying email--do not pay any mind to the email that is being replied to.',
+        chat,
     )
 
     try:
-        goals = json.loads(oai_response.choices[0].message.content)
+        goals = json.loads(oai_response)
 
         return goals
     except Exception as e:
@@ -268,19 +274,9 @@ def style_email_html(html):
 
 
 def generate_subgoals(goal):
-    oai_response = openai_client.chat.completions.create(
-        model=GPT_MODEL,
-        temperature=TEMPERATURE,
-        messages=[
-            {
-                "role": "system",
-                "content": "you're a world class coach--of everything. You are opinionated, obsessively creative, and _always_ know exactly what to do in order to achieve a client's goal. Your solutions are _concise_--they never do more than is needed--and are exceedingly precise--they are composed of _very specific_ subtasks that get to the core of the problem and address it entirely. Your words are inspiring and creative. Your guidance is actionable and precise. In this chat, you will be given a goal--you're job is to provide an expertly guided, actionable list of steps to take to accomplish that goal. The client should _never_ walk away with any possible questions on what to do. Distill your list into 5 key points into a JSON array, each object having fields 'name' and a detailed 'description'. Ensure your response is plaintext, without markdown formatting.",
-            },
-            {
-                "role": "user",
-                "content": f"{goal.name} -- {goal.description}",
-            },
-        ],
+    oai_response = openai_prompt(
+        "you're a world class coach--of everything. You are opinionated, obsessively creative, and _always_ know exactly what to do in order to achieve a client's goal. Your solutions are _concise_--they never do more than is needed--and are exceedingly precise--they are composed of _very specific_ subtasks that get to the core of the problem and address it entirely. Your words are inspiring and creative. Your guidance is actionable and precise. In this chat, you will be given a goal--you're job is to provide an expertly guided, actionable list of steps to take to accomplish that goal. The client should _never_ walk away with any possible questions on what to do. Distill your list into 5 key points into a JSON array, each object having fields 'name' and a detailed 'description'. Ensure your response is plaintext, without markdown formatting.",
+        f"{goal.name} -- {goal.description}",
     )
 
     return [
@@ -290,7 +286,7 @@ def generate_subgoals(goal):
             name=sg["name"],
             description=sg["description"],
         )
-        for sg in json.loads(oai_response.choices[0].message.content)
+        for sg in json.loads(oai_response)
     ]
 
 
@@ -310,6 +306,7 @@ def get_html_from_email(email_content):
 
 # shorthand for the `ses_client.send_email` function
 def send_email(subject, html_content, recipient):
+    print(f"sending email '{subject}' to {recipient}")
     print(
         ses_client.send_email(
             FromEmailAddress="ritual@joeytan.dev",
@@ -341,6 +338,9 @@ def send_error_email(subject, failed_objects, error, email_content, recipient):
 @app.route("/newsletter-signup", methods=["POST"])
 def newsletter_signup():
     email = request.json["email"]
+
+    print(f"newsletter_signup called for email '{email}'")
+
     user = User.query.filter_by(username=email).first()
     if user is not None:
         return "This user is already registered", 409
@@ -349,7 +349,10 @@ def newsletter_signup():
         db.session.add(User(username=email, password=secrets.token_hex(32)))
         db.session.commit()
 
+        print(f"user created for {email}")
+
         with open("onboarding.html", "r") as f:
+            print(f"sending onboarding email to {email}")
             ses_client.send_email(
                 FromEmailAddress="ritual@joeytan.dev",
                 Destination={"ToAddresses": [email]},
@@ -373,6 +376,9 @@ def newsletter_signup():
 @app.route("/onboarding", methods=["POST"])
 @email_auth
 def onboarding():
+    deliverer = request.json["username"]
+    print(f"onboarding started for user '{deliverer}'")
+
     def extract_latest_message(email_data):
         msg = BytesParser(policy=policy.default).parsebytes(email_data)
 
@@ -398,6 +404,7 @@ def onboarding():
         db.session.delete(eg)
 
     if len(existing_goals) > 0:
+        print(f"deleting {len(existing_goals)} preexisting goals")
         db.session.commit()
 
     html_content = extract_latest_message(request.json["email_data"].encode("utf-8"))
@@ -409,7 +416,6 @@ def onboarding():
         return "Error: missing onboarding tag", 400
 
     html_content = html_content[: match.start()]
-    deliverer = request.json["username"]
 
     creation_receipt = []
     goal_json = goals_from_chat(html_content)
@@ -427,8 +433,10 @@ def onboarding():
 
     db.session.commit()
 
+    subgoal_count = 0
     for goal in goals:
         subgoals = generate_subgoals(goal)
+        subgoal_count += len(subgoals)
 
         creation_receipt.append({"goal": goal, "subgoals": subgoals})
         db.session.add_all(subgoals)
@@ -437,6 +445,8 @@ def onboarding():
         set_user_active(request.user_id)
 
         db.session.commit()
+
+        print(f"created {len(goals)} goals and {subgoal_count} subgoals")
 
         response = '<h1 style="font-family: Helvetica;">New Goals Set</h1>'
         for g in creation_receipt:
@@ -464,11 +474,13 @@ def onboarding():
 @app.route("/email-log-activities", methods=["POST"])
 @email_auth
 def email_log_activities():
+    deliverer = request.json["username"]
+    print(f"logging activities by email from {deliverer}")
+
     msg = BytesParser(policy=policy.default).parsebytes(
         request.json["email_data"].encode("utf-8")
     )
 
-    deliverer = request.json["username"]
     html_content = get_html_from_email(msg)
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -493,6 +505,8 @@ def email_log_activities():
     try:
         set_user_active(request.user_id)
         db.session.commit()
+
+        print(f"committed {len(activities)} activities")
 
         today_datetime = datetime.strptime(today, DATE_FORMAT)
         activities = (
@@ -545,25 +559,11 @@ def send_newsletters():
             Subgoal.user_id == user.user_id,
         )
 
-        activities_and_goals = format_activities_and_goals(activities, goals, subgoals)
-
         ethos = get_ethos()
-        oai_response = openai_client.chat.completions.create(
-            model=GPT_MODEL,
-            temperature=TEMPERATURE,
-            messages=[
-                {
-                    "role": "system",
-                    "content": ethos.summary,
-                },
-                {
-                    "role": "user",
-                    "content": activities_and_goals,
-                },
-            ],
-        )
+        activities_and_goals = format_activities_and_goals(activities, goals, subgoals)
+        oai_response = openai_prompt(ethos.summary, activities_and_goals)
 
-        html = markdown.markdown(oai_response.choices[0].message.content)
+        html = markdown.markdown(oai_response)
         for tag in ("<h1>", "<h2>", "<h3>", "<h4>"):
             html = html.replace(tag, tag[:-1] + ' style="font-family: Helvetica;">')
 
