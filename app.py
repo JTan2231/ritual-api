@@ -48,7 +48,8 @@ class User(db.Model):
     user_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     username = db.Column(db.String(256), nullable=False, unique=True)
     password = db.Column(db.String(256), nullable=False)
-    active = db.Column(db.Boolean, default=True, nullable=False)
+    active = db.Column(db.Boolean, default=False, nullable=False)
+    last_active = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
 class Ethos(db.Model):
@@ -114,6 +115,12 @@ def email_auth(func):
                 return "Unauthorized", 401
 
     return wrapper
+
+
+def set_user_active(user_id):
+    user = User.query.filter_by(user_id=user_id).first()
+    user.active = True
+    user.last_active = datetime.now()
 
 
 def get_ethos():
@@ -333,8 +340,6 @@ def send_error_email(subject, failed_objects, error, email_content, recipient):
 
 @app.route("/newsletter-signup", methods=["POST"])
 def newsletter_signup():
-    # TODO: don't forget to send the onboarding email
-
     email = request.json["email"]
     user = User.query.filter_by(username=email).first()
     if user is not None:
@@ -429,6 +434,8 @@ def onboarding():
         db.session.add_all(subgoals)
 
     try:
+        set_user_active(request.user_id)
+
         db.session.commit()
 
         response = '<h1 style="font-family: Helvetica;">New Goals Set</h1>'
@@ -484,6 +491,7 @@ def email_log_activities():
     db.session.add_all(activities)
 
     try:
+        set_user_active(request.user_id)
         db.session.commit()
 
         today_datetime = datetime.strptime(today, DATE_FORMAT)
