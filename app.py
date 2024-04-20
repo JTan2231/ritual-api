@@ -11,6 +11,7 @@ from functools import wraps
 import boto3
 import markdown2 as markdown
 from flask import Flask, request, send_from_directory
+from flask_apscheduler import APScheduler
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from openai import OpenAI
@@ -20,6 +21,11 @@ ses_client = boto3.client("sesv2")
 
 app = Flask(__name__, static_folder="build", static_url_path="/")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["RITUAL_DB_URL"]
+app.config["SCHEDULER_API_ENABLED"] = True
+
+scheduler = APScheduler()
+scheduler.init_app(app)
+scheduler.start()
 
 CORS(app)
 
@@ -574,6 +580,20 @@ def send_newsletters():
         )
 
     return "success", 200
+
+
+@scheduler.task("cron", id="user_last_active_check", hour=18, minute=0)
+def user_last_active_check():
+    print("running `user_last_active_check`")
+    limit = datetime.now() - timedelta(days=4)
+    with app.app_context():
+        users = User.query.filter(User.last_active < limit, User.active).all()
+        for i in range(len(users)):
+            users[i].active = False
+
+        db.session.commit()
+
+    print(f"end `user_last_active_check` -- updated {len(users)} users")
 
 
 @app.route("/")
