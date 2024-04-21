@@ -56,7 +56,7 @@ class User(db.Model):
     password = db.Column(db.String(256), nullable=False)
     active = db.Column(db.Boolean, default=False, nullable=False)
     last_active = db.Column(db.DateTime, default=datetime.now, nullable=False)
-    # receiving_logs = db.Column(db.Boolean, default=False, nullable=False)
+    receiving_logs = db.Column(db.Boolean, default=False, nullable=False)
 
 
 class Ethos(db.Model):
@@ -102,6 +102,7 @@ class Token(db.Model):
 # for actions performed through email
 # POST requests _only_
 # `username` must be included in the JSON body of the request
+# sets user_id in request
 def email_auth(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -123,6 +124,32 @@ def email_auth(func):
             user = User.query.filter_by(username=username).one()
 
             if encoded_credentials == email_api_token:
+                request.user_id = user.user_id
+                return func(*args, **kwargs)
+            else:
+                return "Unauthorized", 401
+
+    return wrapper
+
+
+# generic token authentication
+# requires only { Authorization: `Basic ${token}` } header
+# sets user_id in request
+def token_auth(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        auth = request.headers.get("Authorization")
+        if auth is None:
+            return "Unauthorized", 401
+        else:
+            type, token = auth.split(" ", 1)
+            type = type.lower()
+            if type != "bearer":
+                return "Unauthorized", 401
+
+            user = User.query.join(Token).filter(Token.data == token).first()
+
+            if user is not None:
                 request.user_id = user.user_id
                 return func(*args, **kwargs)
             else:
@@ -607,8 +634,73 @@ def user_config():
 
 
 @app.route("/update-settings", methods=["POST"])
+@token_auth
 def update_settings():
-    return
+    if request.json["delete_user"]:
+        print(f"deleting user id {request.user_id}")
+        user_data = (
+            Activity.query.filter_by(user_id=request.user_id).all()
+            + Subgoal.query.filter_by(user_id=request.user_id).all()
+            + Goal.query.filter_by(user_id=request.user_id).all()
+            + User.query.filter_by(user_id=request.user_id).all()
+        )
+
+        print(f"deleting {len(user_data)} items associated with user {request.user_id}")
+
+        email = user_data[-1].username
+
+        for data in user_data:
+            db.session.delete(data)
+
+        try:
+            db.session.commit()
+
+            send_email(
+                "User Deleted",
+                "Your account and all of its associated data has been deleted.\n\nThank you for using Ritual.",
+                email,
+            )
+
+            return "success", 200
+        except Exception as e:
+            print(f"update_settings error: {e}")
+
+            send_error_email(
+                "Error Deleting User",
+                f"There was an error deleting user {email}. Please contact j.tan2231@gmail.com to get this issue resolved.",
+                email,
+            )
+
+            send_error_email(
+                "Error Deleting User",
+                f"There was an error deleting user {email}. Please contact j.tan2231@gmail.com to get this issue resolved.",
+                "j.tan2231@gmail.com",
+            )
+
+            return "error", 400
+
+    user = User.query.filter_by(user_id=request.user_id).first()
+    user.receiving_logs = request.json["receiving_logs"]
+    user.active = request.json["receiving_newsletters"]
+
+    try:
+        db.session.commit()
+
+        print(
+            f"updated user {user.username} with the following settings: {request.json}"
+        )
+
+        send_email(
+            "Updated Account Settings",
+            f"Your account settings have been updated to reflect the following values:<ul><li>Receiving newsletters: <b>{user.active}</b><li>Receiving log receipts: <b>{user.receiving_logs}</b></ul>",
+            user.username,
+        )
+
+        return "success", 200
+    except Exception as e:
+        print(f"update_settings error: {e}")
+
+        return "error", 400
 
 
 @scheduler.task("cron", id="user_last_active_check", hour=18, minute=0)
