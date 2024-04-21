@@ -10,7 +10,7 @@ from functools import wraps
 
 import boto3
 import markdown2 as markdown
-from flask import Flask, request, send_from_directory
+from flask import Flask, redirect, request, send_from_directory
 from flask_apscheduler import APScheduler
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -56,6 +56,7 @@ class User(db.Model):
     password = db.Column(db.String(256), nullable=False)
     active = db.Column(db.Boolean, default=False, nullable=False)
     last_active = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    # receiving_logs = db.Column(db.Boolean, default=False, nullable=False)
 
 
 class Ethos(db.Model):
@@ -89,6 +90,13 @@ class Subgoal(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"), nullable=False)
     name = db.Column(db.String(256), nullable=False)
     description = db.Column(db.String(4096), nullable=False)
+
+
+class Token(db.Model):
+    token_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"), nullable=False)
+    data = db.Column(db.String(256), nullable=False)
+    creation_date = db.Column(db.DateTime, nullable=False)
 
 
 # for actions performed through email
@@ -235,7 +243,7 @@ def openai_prompt(system_prompt, user_prompt):
 # TODO: better error handling when this fails
 def activity_from_chat(chat):
     oai_response = openai_prompt(
-        f'You are an assistant designed to convert conversationally-styled messages describing the user\'s activities and turn them into a list of objects, each object of the following JSON format: {{ "activity_name": "name of activity (string)", "activity_begin": "timestamp ({TIME_FORMAT}) of when the activity began | null", "activity_end": "timestamp ({TIME_FORMAT}) of when the activity ended | null", "memo": "a string describing the details of the activity" }}. Note, your response _must_ be an array of JSON objects--maybe even empty! Pay special attention to the verbs in the message--it is _very_ important that you log _all_ activities listed in the message. But also! You _must not be redundant_. There _must not_ be activities logged that fit under the umbrella of another. Note: the only contents of the message _must_ be JSON parseable--no markdown or any other similar formatting.',
+        f'You are an assistant designed to convert conversationally-styled messages describing the user\'s activities and turn them into a list of objects, each object of the following JSON format: {{ "activity_name": "name of activity (string)", "activity_begin": "timestamp ({TIME_FORMAT}) of when the activity began | null", "activity_end": "timestamp ({TIME_FORMAT}) of when the activity ended | null", "memo": "a string describing the details of the activity" }}. Note, your response _must_ be an array of JSON objects--maybe even empty! Pay special attention to the verbs in the message--it is _very_ important that you log _all_ activities listed in the message. _Every_ detail must be accounted for--side thoughts and tangential details are important and must be included! But also! You _must not be redundant_. There _must not_ be activities logged that fit under the umbrella of another. Note: the only contents of the message _must_ be JSON parseable--no markdown or any other similar formatting.',
         chat,
     )
 
@@ -296,15 +304,15 @@ def generate_subgoals(goal):
     ]
 
 
-def get_html_from_email(email_content):
+def get_text_from_email(email_content):
     html_content = ""
 
     if email_content.is_multipart():
         for part in email_content.walk():
-            if part.get_content_type() == "text/html":
+            if part.get_content_type() == "text/plain":
                 html_content += part.get_content()
     else:
-        if email_content.get_content_type() == "text/html":
+        if email_content.get_content_type() == "text/plain":
             html_content += email_content.get_content()
 
     return html_content
@@ -487,8 +495,10 @@ def email_log_activities():
         request.json["email_data"].encode("utf-8")
     )
 
-    html_content = get_html_from_email(msg)
+    html_content = get_text_from_email(msg)
     today = datetime.now().strftime("%Y-%m-%d")
+
+    print(html_content)
 
     def sanitize_date(date):
         return date if len(date) > 0 else None
@@ -580,6 +590,25 @@ def send_newsletters():
         )
 
     return "success", 200
+
+
+@app.route("/get-config-token", methods=["GET"])
+def user_config():
+    username = request.args.get("email", None)
+    if username is None:
+        return "username not found", 400
+
+    user = User.query.filter_by(username=username).first()
+    token = Token(user_id=user.user_id, data=secrets.token_urlsafe(16))
+    db.session.add(token)
+    db.session.commit()
+
+    return redirect(f"https://joeytan.dev/ritual_configuration?token={token.data}")
+
+
+@app.route("/update-settings", methods=["POST"])
+def update_settings():
+    return
 
 
 @scheduler.task("cron", id="user_last_active_check", hour=18, minute=0)
