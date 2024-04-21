@@ -164,6 +164,8 @@ def set_user_active(user_id):
     user.active = True
     user.last_active = datetime.now()
 
+    return user
+
 
 def get_ethos():
     ethos = Ethos.query.filter_by(user_id=request.user_id).first()
@@ -546,7 +548,7 @@ def email_log_activities():
     db.session.add_all(activities)
 
     try:
-        set_user_active(request.user_id)
+        user = set_user_active(request.user_id)
         db.session.commit()
 
         print(f"committed {len(activities)} activities")
@@ -564,11 +566,12 @@ def email_log_activities():
 
         activities_html = get_activity_html_string(activities)
 
-        send_email(
-            f"{today} Activities Logged",
-            activities_html,
-            deliverer,
-        )
+        if user.receiving_logs:
+            send_email(
+                f"{today} Activities Logged",
+                activities_html,
+                deliverer,
+            )
 
         return "success", 200
     except Exception as e:
