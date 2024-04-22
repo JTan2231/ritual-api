@@ -56,7 +56,7 @@ class User(db.Model):
     password = db.Column(db.String(256), nullable=False)
     active = db.Column(db.Boolean, default=False, nullable=False)
     last_active = db.Column(db.DateTime, default=datetime.now, nullable=False)
-    receiving_logs = db.Column(db.Boolean, default=False, nullable=False)
+    receiving_logs = db.Column(db.Boolean, default=True, nullable=False)
 
 
 class Ethos(db.Model):
