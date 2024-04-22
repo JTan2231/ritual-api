@@ -306,10 +306,11 @@ def goals_from_chat(chat):
         return {}
 
 
-def style_email_html(html):
+def style_email_html(html, recipient):
     formatted = (
         '<div style="max-width:600px; margin:auto; padding:20px; font-size:20px; font-family: serif"">'
         + html
+        + f'<p style="font-size: 14px; padding-top: 2rem;">If you would like to unsubscribe or customize your account settings, <a href="https://ritual-api-production.up.railway.app/get-config-token?email={recipient}">click here</a>.</p>'
         + "</div>"
     )
 
@@ -357,7 +358,9 @@ def send_email(subject, html_content, recipient):
             Content={
                 "Simple": {
                     "Subject": {"Data": subject},
-                    "Body": {"Html": {"Data": style_email_html(html_content)}},
+                    "Body": {
+                        "Html": {"Data": style_email_html(html_content, recipient)}
+                    },
                 }
             },
         )
@@ -527,8 +530,6 @@ def email_log_activities():
     html_content = get_text_from_email(msg)
     today = datetime.now().strftime("%Y-%m-%d")
 
-    print(html_content)
-
     def sanitize_date(date):
         return date if len(date) > 0 else None
 
@@ -622,18 +623,28 @@ def send_newsletters():
     return "success", 200
 
 
+def style_config_status(message):
+    return f'<div style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: monospace;">{message}</div>'
+
+
 @app.route("/get-config-token", methods=["GET"])
 def user_config():
     username = request.args.get("email", None)
     if username is None:
-        return "username not found", 400
+        return style_config_status("username not found"), 400
 
     user = User.query.filter_by(username=username).first()
     token = Token(user_id=user.user_id, data=secrets.token_urlsafe(16))
     db.session.add(token)
     db.session.commit()
 
-    return redirect(f"https://joeytan.dev/ritual_configuration?token={token.data}")
+    send_email(
+        "Update Account Settings",
+        f"https://joeytan.dev/ritual_configuration?token={token.data}",
+        username,
+    )
+
+    return style_config_status(f"Account settings update email sent to {username}"), 200
 
 
 @app.route("/update-settings", methods=["POST"])
@@ -718,6 +729,20 @@ def user_last_active_check():
         db.session.commit()
 
     print(f"end `user_last_active_check` -- updated {len(users)} users")
+
+
+@scheduler.task("interval", id="clean_tokens", seconds=900, misfire_grace_time=900)
+def clean_tokens():
+    print("running `clean_tokens`")
+    limit = datetime.now() - timedelta(minutes=15)
+    with app.app_context():
+        tokens = Token.query.filter(Token.creation_date > limit).all()
+        for token in tokens:
+            db.session.delete(token)
+
+        db.session.commit()
+
+    print(f"end `clean_tokens` -- updated {len(tokens)} users")
 
 
 @app.route("/")
