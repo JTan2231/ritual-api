@@ -306,15 +306,24 @@ def goals_from_chat(chat):
         return {}
 
 
-def style_email_html(html, recipient):
-    formatted = (
-        '<div style="max-width:600px; margin:auto; padding:20px; font-size:20px; font-family: serif"">'
-        + html
-        + f'<p style="font-size: 14px; padding-top: 2rem;">If you would like to unsubscribe or customize your account settings, <a href="https://ritual-api-production.up.railway.app/get-config-token?email={recipient}">click here</a>.</p>'
-        + "</div>"
-    )
+def style_email_html(html, recipient, format=True):
+    formatted = ""
+    if format:
+        formatted = (
+            '<div style="max-width:600px; margin:auto; padding:20px; font-size:20px; font-family: serif">'
+            + html
+            + f'<p style="font-size: 14px; padding-top: 2rem;">If you would like to unsubscribe or customize your account settings, <a href="https://ritual-api-production.up.railway.app/get-config-token?email={recipient}">click here</a>.</p>'
+            + "</div>"
+        )
+    else:
+        formatted = (
+            '<div style="max-width: 600px; margin: auto; padding: 20px; font-size: 16px; font-family: Helvetica;>'
+            + "Use this link to change your account settings: "
+            + html
+            + "</div>"
+        )
 
-    return formatted
+    return formatted if format else html
 
 
 def generate_subgoals(goal):
@@ -349,7 +358,7 @@ def get_text_from_email(email_content):
 
 
 # shorthand for the `ses_client.send_email` function
-def send_email(subject, html_content, recipient):
+def send_email(subject, html_content, recipient, format=True):
     print(f"sending email '{subject}' to {recipient}")
     print(
         ses_client.send_email(
@@ -359,7 +368,9 @@ def send_email(subject, html_content, recipient):
                 "Simple": {
                     "Subject": {"Data": subject},
                     "Body": {
-                        "Html": {"Data": style_email_html(html_content, recipient)}
+                        "Html": {
+                            "Data": (style_email_html(html_content, recipient, format))
+                        }
                     },
                 }
             },
@@ -642,6 +653,7 @@ def user_config():
         "Update Account Settings",
         f"https://joeytan.dev/ritual_configuration?token={token.data}",
         username,
+        format=False,
     )
 
     return style_config_status(f"Account settings update email sent to {username}"), 200
