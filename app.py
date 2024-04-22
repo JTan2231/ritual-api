@@ -96,7 +96,7 @@ class Token(db.Model):
     token_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"), nullable=False)
     data = db.Column(db.String(256), nullable=False)
-    creation_date = db.Column(db.DateTime, nullable=False)
+    creation_date = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
 # for actions performed through email
