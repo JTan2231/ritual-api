@@ -10,7 +10,7 @@ from functools import wraps
 
 import boto3
 import markdown2 as markdown
-from flask import Flask, redirect, request, send_from_directory
+from flask import Flask, request, send_from_directory
 from flask_apscheduler import APScheduler
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -320,10 +320,10 @@ def style_email_html(html, recipient, format=True):
             '<div style="max-width: 600px; margin: auto; padding: 20px; font-size: 16px; font-family: Helvetica;>'
             + "Use this link to change your account settings: "
             + html
-            + "</div>"
+            + " Do not share this link with anybody. This link expires 15 minutes after its creation.</div>"
         )
 
-    return formatted if format else html
+    return formatted
 
 
 def generate_subgoals(goal):
