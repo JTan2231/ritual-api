@@ -59,6 +59,14 @@ class User(db.Model):
     receiving_logs = db.Column(db.Boolean, default=True, nullable=False)
 
 
+class Email(db.Model):
+    email_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"))
+    raw_email = db.Column(db.Text, nullable=False)
+    creation_date = db.Column(db.DateTime, default=datetime.now)
+    imported_data = db.Column(db.Boolean, default=False)
+
+
 class Ethos(db.Model):
     ethos_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"), nullable=False)
@@ -317,7 +325,7 @@ def style_email_html(html, recipient, format=True):
         )
     else:
         formatted = (
-            '<div style="max-width: 600px; margin: auto; padding: 20px; font-size: 16px; font-family: Helvetica;>'
+            '<div style="max-width: 600px; margin: auto; padding: 20px; font-size: 16px; font-family: Helvetica;">'
             + "Use this link to change your account settings: "
             + html
             + " Do not share this link with anybody. This link expires 15 minutes after its creation.</div>"
@@ -390,6 +398,38 @@ def send_error_email(subject, failed_objects, error, email_content, recipient):
         f"The following goals/subgoals failed to log:\n{pprint.pformat(failed_objects)}\n\nError: {str(error)}\n\Email content:\n{email_content}",
         "j.tan2231@gmail.com",
     )
+
+
+# get all user entries within the past `days` days
+def get_user_entries_in_range(user_id, days):
+    emails = Email.query.filter(
+        Email.user_id == user_id,
+        Email.creation_date > datetime.now() - timedelta(days=days),
+    ).all()
+
+    return emails
+
+
+def get_db_email_text(email_object):
+    msg = BytesParser(policy=policy.default).parsebytes(
+        email_object.raw_email.encode("utf-8")
+    )
+    return get_text_from_email(msg)
+
+
+# formatted in a string for GPT
+def format_emails_for_gpt(emails):
+    formatted_string = ""
+    for e in emails:
+        formatted_string += f"{e.creation_date} -- "
+        if e.imported_data:
+            formatted_string += e.raw_email
+        else:
+            formatted_string += get_db_email_text(e)
+
+        formatted_string += "\n\n"
+
+    return formatted_string
 
 
 @app.route("/newsletter-signup", methods=["POST"])
@@ -534,54 +574,38 @@ def email_log_activities():
     deliverer = request.json["username"]
     print(f"logging activities by email from {deliverer}")
 
-    msg = BytesParser(policy=policy.default).parsebytes(
-        request.json["email_data"].encode("utf-8")
-    )
-
-    html_content = get_text_from_email(msg)
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    def sanitize_date(date):
-        return date if len(date) > 0 else None
-
-    activity_json = activity_from_chat(html_content)
-    activities = [
-        Activity(
+    db.session.add(
+        Email(
             user_id=request.user_id,
-            name=a["activity_name"],
-            activity_begin=sanitize_date(a["activity_begin"]),
-            activity_end=sanitize_date(a["activity_end"]),
-            activity_date=today,
-            memo=a["memo"],
+            raw_email=request.json["email_data"],
+            imported_data=False,
         )
-        for a in activity_json
-    ]
-
-    db.session.add_all(activities)
+    )
 
     try:
         user = set_user_active(request.user_id)
         db.session.commit()
 
-        print(f"committed {len(activities)} activities")
+        emails = get_user_entries_in_range(request.user_id, 7)
 
-        today_datetime = datetime.strptime(today, DATE_FORMAT)
-        activities = (
-            Activity.query.filter(
-                Activity.activity_date.between(
-                    today_datetime - timedelta(days=7), today_datetime
-                )
-            )
-            .filter_by(user_id=request.user_id)
-            .all()
+        days = {e.creation_date.strftime(DATE_FORMAT): [] for e in emails}
+        for e in emails:
+            days[e.creation_date.strftime(DATE_FORMAT)].append(get_db_email_text(e))
+
+        days = sorted(
+            [(key, value) for key, value in days.items()],
+            key=lambda x: x[0],
+            reverse=True,
         )
 
-        activities_html = get_activity_html_string(activities)
+        receipt_html = ""
+        for key, value in days:
+            receipt_html += f"<p><h2>{key}</h2>{'<hr>'.join(value)}</p>"
 
         if user.receiving_logs:
             send_email(
-                f"{today} Activities Logged",
-                activities_html,
+                f"{datetime.now().strftime(DATE_FORMAT)} Activities Logged",
+                receipt_html,
                 deliverer,
             )
 
@@ -590,7 +614,7 @@ def email_log_activities():
         print(f"error: {str(e)}")
 
         send_error_email(
-            "Error Logging Activities", activities, e, html_content, deliverer
+            "Error Logging Activities", [], e, request.json["email_data"], deliverer
         )
 
         return str(e), 400
@@ -600,26 +624,13 @@ def email_log_activities():
 @email_auth
 def send_newsletters():
     end_date = datetime.now()
-    begin_date = end_date - timedelta(days=7)
 
     users = User.query.filter_by(active=True).all()
     print(f"sending newsletters to {[u.username for u in users]}")
     for user in users:
-        activities = Activity.query.filter(
-            Activity.activity_date >= begin_date,
-            Activity.activity_date <= end_date,
-            Activity.user_id == user.user_id,
-        ).all()
-
-        goals = Goal.query.filter_by(user_id=user.user_id).all()
-        subgoals = Subgoal.query.filter(
-            Subgoal.goal_id.in_([g.goal_id for g in goals]),
-            Subgoal.user_id == user.user_id,
-        )
-
         ethos = get_ethos()
-        activities_and_goals = format_activities_and_goals(activities, goals, subgoals)
-        oai_response = openai_prompt(ethos.summary, activities_and_goals)
+        emails = get_user_entries_in_range(request.user_id, 7)
+        oai_response = openai_prompt(ethos.summary, format_emails_for_gpt(emails))
 
         html = markdown.markdown(oai_response)
         for tag in ("<h1>", "<h2>", "<h3>", "<h4>"):
