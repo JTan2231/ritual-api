@@ -629,7 +629,7 @@ def send_newsletters():
     print(f"sending newsletters to {[u.username for u in users]}")
     for user in users:
         ethos = get_ethos()
-        emails = get_user_entries_in_range(request.user_id, 7)
+        emails = get_user_entries_in_range(user.user_id, 7)
         oai_response = openai_prompt(ethos.summary, format_emails_for_gpt(emails))
 
         html = markdown.markdown(oai_response)
