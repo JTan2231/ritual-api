@@ -685,7 +685,9 @@ def update_settings():
         return "error", 400
 
 
-@scheduler.task("cron", id="send_test_newsletters", day_of_week="sat", hour=13)
+@scheduler.task(
+    "cron", id="send_test_newsletters", day_of_week="sat", hour=21, minute=15
+)
 def send_test_newsletters():
     end_date = datetime.now()
 
