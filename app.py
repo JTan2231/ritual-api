@@ -60,6 +60,7 @@ class User(db.Model):
     active = db.Column(db.Boolean, default=False, nullable=False)
     last_active = db.Column(db.DateTime, default=datetime.now, nullable=False)
     receiving_logs = db.Column(db.Boolean, default=True, nullable=False)
+    test_user = db.Column(db.Boolean, default=False, nullable=False)
 
 
 class Email(db.Model):
@@ -176,14 +177,6 @@ def set_user_active(user_id):
     user.last_active = datetime.now()
 
     return user
-
-
-def get_ethos():
-    ethos = Ethos.query.filter_by(user_id=request.user_id).first()
-    if ethos is None:
-        ethos = EthosDefault
-
-    return ethos
 
 
 def get_activity_formatted_string(activities):
@@ -545,6 +538,38 @@ def email_log_activities():
         return str(e), 400
 
 
+def get_newsletter(user):
+    emails = get_user_entries_in_range(user.user_id, 7)
+    formatted_email_text = format_emails_for_gpt(emails)
+    oai_response = openai_prompt(EthosDefault.summary, formatted_email_text)
+
+    html = markdown.markdown(oai_response)
+    for tag in ("<h1>", "<h2>", "<h3>", "<h4>"):
+        html = html.replace(tag, tag[:-1] + ' style="font-family: Helvetica;">')
+
+    quote_data = get_quote(formatted_email_text)
+
+    max_len = 500
+    # find earliest punctuation after the `max_len` char mark and cut off
+    if len(quote_data["text"]) > max_len:
+        mark = max_len
+        for i, c in enumerate(quote_data["text"][max_len:]):
+            if c in (";", ",", ".", "/"):
+                mark += i
+                break
+
+        quote_data["text"] = quote_data["text"][:mark] + "..."
+
+    html = (
+        '<blockquote style="margin-bottom: 2em"><p style="font-size: 1.1rem"><i>"'
+        + quote_data["text"]
+        + f'"</i></p><cite style="font-size: 1rem">— {quote_data["author"]}, {quote_data["title"]}</cite></blockquote><hr>'
+        + html
+    )
+
+    return html
+
+
 @app.route("/send-newsletters", methods=["POST"])
 @email_auth
 def send_newsletters():
@@ -553,40 +578,14 @@ def send_newsletters():
     users = User.query.filter_by(active=True).all()
     print(f"sending newsletters to {[u.username for u in users]}")
     for user in users:
-        ethos = get_ethos()
-        emails = get_user_entries_in_range(user.user_id, 7)
-        formatted_email_text = format_emails_for_gpt(emails)
-        oai_response = openai_prompt(ethos.summary, formatted_email_text)
-
-        html = markdown.markdown(oai_response)
-        for tag in ("<h1>", "<h2>", "<h3>", "<h4>"):
-            html = html.replace(tag, tag[:-1] + ' style="font-family: Helvetica;">')
-
-        quote_data = get_quote(formatted_email_text)
-
-        max_len = 500
-        # find earliest punctuation after the `max_len` char mark and cut off
-        if len(quote_data["text"]) > max_len:
-            mark = max_len
-            for i, c in enumerate(quote_data["text"][max_len:]):
-                if c in (";", ",", ".", "/"):
-                    mark += i
-                    break
-
-            quote_data["text"] = quote_data["text"][:mark] + "..."
-
-        html = (
-            '<blockquote style="margin-bottom: 2em"><p style="font-size: 1.1rem"><i>"'
-            + quote_data["text"]
-            + f'"</i></p><cite style="font-size: 1rem">— {quote_data["author"]}, {quote_data["title"]}</cite></blockquote><hr>'
-            + html
-        )
-
-        send_email(
-            f'Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
-            html,
-            user.username,
-        )
+        try:
+            send_email(
+                f'Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
+                get_newsletter(user),
+                user.username,
+            )
+        except Exception as e:
+            print(f"error generating newsletter for {user.username}: {e}")
 
     return "success", 200
 
@@ -684,6 +683,24 @@ def update_settings():
         print(f"update_settings error: {e}")
 
         return "error", 400
+
+
+@scheduler.task("cron", id="send_test_newsletters", day_of_week="sat", hour=13)
+def send_test_newsletters():
+    end_date = datetime.now()
+
+    with app.app_context():
+        users = User.query.filter_by(test_user=True).all()
+        print(f"sending test newsletters to {[u.username for u in users]}")
+        for user in users:
+            try:
+                send_email(
+                    f'{{TESTING}} Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
+                    get_newsletter(user),
+                    user.username,
+                )
+            except Exception as e:
+                print(f"error generating newsletter for {user.username}: {e}")
 
 
 @scheduler.task("cron", id="user_last_active_check", hour=18, minute=0)
