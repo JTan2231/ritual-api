@@ -1,7 +1,7 @@
 import json
 import os
 import pprint
-import re
+import random
 import secrets
 from datetime import date, datetime, timedelta
 from email import policy
@@ -15,9 +15,12 @@ from flask_apscheduler import APScheduler
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from openai import OpenAI
+from pinecone import Pinecone
 
 openai_client = OpenAI()
 ses_client = boto3.client("sesv2")
+pinecone_client = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
+pc_index = pinecone_client.Index("ritual")
 
 app = Flask(__name__, static_folder="build", static_url_path="/")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["RITUAL_DB_URL"]
@@ -432,6 +435,27 @@ def format_emails_for_gpt(emails):
     return formatted_string
 
 
+# get oai embedding for `text`
+# then find most similar quote
+def get_quote(text):
+    embedding = (
+        openai_client.embeddings.create(input=text, model="text-embedding-3-small")
+        .data[0]
+        .embedding
+    )
+
+    responses = [
+        x["metadata"]
+        for x in pc_index.query(
+            vector=embedding,
+            top_k=10,
+            include_metadata=True,
+        )["matches"]
+    ]
+
+    return random.choice(responses)
+
+
 @app.route("/newsletter-signup", methods=["POST"])
 def newsletter_signup():
     email = request.json["email"]
@@ -465,105 +489,6 @@ def newsletter_signup():
         return "Success", 200
     except Exception as e:
         print(f"error: {str(e)}")
-
-        return str(e), 400
-
-
-# NOTE: This resets the user's goals--will this be a permanent feature?
-@app.route("/onboarding", methods=["POST"])
-@email_auth
-def onboarding():
-    deliverer = request.json["username"]
-    print(f"onboarding started for user '{deliverer}'")
-
-    def extract_latest_message(email_data):
-        msg = BytesParser(policy=policy.default).parsebytes(email_data)
-
-        def find_latest_text_part(message):
-            if message.is_multipart():
-                for part in reversed(message.get_payload()):
-                    text = find_latest_text_part(part)
-                    if text:
-                        return text
-            else:
-                if message.get_content_type() == "text/html":
-                    return message.get_payload(decode=True).decode("utf-8")
-
-            return None
-
-        return find_latest_text_part(msg)
-
-    existing_goals = (
-        Goal.query.filter_by(user_id=request.user_id).all()
-        + Subgoal.query.filter_by(user_id=request.user_id).all()
-    )
-    for eg in existing_goals:
-        db.session.delete(eg)
-
-    if len(existing_goals) > 0:
-        print(f"deleting {len(existing_goals)} preexisting goals")
-        db.session.commit()
-
-    html_content = extract_latest_message(request.json["email_data"].encode("utf-8"))
-
-    onboarding_tag = r'id=".*onboarding_tag.*"'
-    match = re.search(onboarding_tag, html_content)
-    if match is None:
-        # TODO: Better error handling
-        return "Error: missing onboarding tag", 400
-
-    html_content = html_content[: match.start()]
-
-    creation_receipt = []
-    goal_json = goals_from_chat(html_content)
-
-    goals = []
-    for g in goal_json:
-        goal = Goal(
-            user_id=request.user_id,
-            name=g["name"],
-            description=g["description"],
-        )
-
-        goals.append(goal)
-        db.session.add(goal)
-
-    db.session.commit()
-
-    subgoal_count = 0
-    for goal in goals:
-        subgoals = generate_subgoals(goal)
-        subgoal_count += len(subgoals)
-
-        creation_receipt.append({"goal": goal, "subgoals": subgoals})
-        db.session.add_all(subgoals)
-
-    try:
-        set_user_active(request.user_id)
-
-        db.session.commit()
-
-        print(f"created {len(goals)} goals and {subgoal_count} subgoals")
-
-        response = '<h1 style="font-family: Helvetica;">New Goals Set</h1>'
-        for g in creation_receipt:
-            goal = g["goal"]
-            subgoals = g["subgoals"]
-            response += f'<h2 style="font-family: Helvetica;">{goal.name} -- {goal.description}</h2><ul>'
-            for sg in subgoals:
-                response += f'<li style="margin-bottom: 0.5rem; font-family: serif;"><b>{sg.name}</b> -- {sg.description}'
-
-            response += "</ul>"
-
-        send_email("New Goals Set", response, deliverer)
-
-        return "success", 200
-    except Exception as e:
-        print(f"error: {str(e)}")
-
-        send_error_email(
-            "Error Setting Goals", creation_receipt, e, html_content, deliverer
-        )
 
         return str(e), 400
 
@@ -630,11 +555,32 @@ def send_newsletters():
     for user in users:
         ethos = get_ethos()
         emails = get_user_entries_in_range(user.user_id, 7)
-        oai_response = openai_prompt(ethos.summary, format_emails_for_gpt(emails))
+        formatted_email_text = format_emails_for_gpt(emails)
+        oai_response = openai_prompt(ethos.summary, formatted_email_text)
 
         html = markdown.markdown(oai_response)
         for tag in ("<h1>", "<h2>", "<h3>", "<h4>"):
             html = html.replace(tag, tag[:-1] + ' style="font-family: Helvetica;">')
+
+        quote_data = get_quote(formatted_email_text)
+
+        max_len = 500
+        # find earliest punctuation after the `max_len` char mark and cut off
+        if len(quote_data["text"]) > max_len:
+            mark = max_len
+            for i, c in enumerate(quote_data["text"][max_len:]):
+                if c in (";", ",", ".", "/"):
+                    mark += i
+                    break
+
+            quote_data["text"] = quote_data["text"][:mark] + "..."
+
+        html = (
+            '<blockquote style="margin-bottom: 2em"><p style="font-size: 1.1rem"><i>"'
+            + quote_data["text"]
+            + f'"</i></p><cite style="font-size: 1rem">— {quote_data["author"]}, {quote_data["title"]}</cite></blockquote><hr>'
+            + html
+        )
 
         send_email(
             f'Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
