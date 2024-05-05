@@ -3,7 +3,7 @@ import os
 import pprint
 import random
 import secrets
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from email import policy
 from email.parser import BytesParser
 from functools import wraps
@@ -61,6 +61,7 @@ class User(db.Model):
     last_active = db.Column(db.DateTime, default=datetime.now, nullable=False)
     receiving_logs = db.Column(db.Boolean, default=True, nullable=False)
     test_user = db.Column(db.Boolean, default=False, nullable=False)
+    archiving = db.Column(db.Boolean, default=True, nullable=False)
 
 
 class Email(db.Model):
@@ -179,81 +180,6 @@ def set_user_active(user_id):
     return user
 
 
-def get_activity_formatted_string(activities):
-    return "Activities:\n- " + "\n- ".join(
-        f"{a.name} -- {a.activity_begin} - {a.activity_end} -- {a.memo}"
-        for a in activities
-    )
-
-
-def get_activity_html_string(activities):
-    days = {}
-    for a in activities:
-        if a.activity_date not in days:
-            days[a.activity_date] = []
-
-        days[a.activity_date].append(a)
-
-    html = '<h1 style="font-family: Helvetica;">Your Activities This Past Week</h1>'
-    html += '<div style="font-family: serif;">'
-
-    day_lists = []
-    for day, day_activities in days.items():
-        day_html = f'<h2 style="font-family: Helvetica;">{day}</h2>'
-        day_html += "<ul>"
-        for a in day_activities:
-            day_html += f"<li><b>{a.name}</b> - {a.memo}"
-
-        day_html += "</ul>"
-
-        day_lists.append((day, day_html))
-
-    day_lists = sorted(day_lists, key=lambda x: x[0], reverse=True)
-
-    for _, day_html in day_lists:
-        html += day_html
-
-    html += "</div>"
-
-    return html
-
-
-# subgoals is a dictionary: { goal.name: subgoal }
-def get_goals_formatted_string(goals, subgoals):
-    output = "Goals:"
-    for g in goals:
-        output += f"\n- {g.name} -- {g.description}"
-        for sg in subgoals[g.name]:
-            output += f"\n  - {sg.name} -- {sg.description}"
-
-        output += "\n"
-
-    return output
-
-
-def format_activities_and_goals(activities, goals, subgoals):
-    goal_id_name_map = {g.goal_id: g.name for g in goals}
-    subgoal_map = {v: [] for v in goal_id_name_map.values()}
-    for sg in subgoals:
-        subgoal_map[goal_id_name_map[sg.goal_id]].append(sg)
-
-    return (
-        get_activity_formatted_string(activities)
-        + "---\n"
-        + get_goals_formatted_string(goals, subgoal_map)
-    )
-
-
-# makes datetime with current date
-def time_to_datetime(time_string):
-    if time_string is None or time_string == "":
-        return ""
-
-    return datetime.combine(
-        date.today(), datetime.strptime(time_string, TIME_FORMAT).time()
-    ).strftime(DATETIME_FORMAT)
-
-
 def openai_prompt(system_prompt, user_prompt):
     print("prompting gpt...")
     oai_response = openai_client.chat.completions.create(
@@ -271,43 +197,6 @@ def openai_prompt(system_prompt, user_prompt):
     print(f"prompt finished. usage: {oai_response.usage}")
 
     return oai_response.choices[0].message.content
-
-
-# TODO: better error handling when this fails
-def activity_from_chat(chat):
-    oai_response = openai_prompt(
-        f'You are an assistant designed to convert conversationally-styled messages describing the user\'s activities and turn them into a list of objects, each object of the following JSON format: {{ "activity_name": "name of activity (string)", "activity_begin": "timestamp ({TIME_FORMAT}) of when the activity began | null", "activity_end": "timestamp ({TIME_FORMAT}) of when the activity ended | null", "memo": "a string describing the details of the activity" }}. Note, your response _must_ be an array of JSON objects--maybe even empty! Pay special attention to the verbs in the message--it is _very_ important that you log _all_ activities listed in the message. _Every_ detail must be accounted for--side thoughts and tangential details are important and must be included! But also! You _must not be redundant_. There _must not_ be activities logged that fit under the umbrella of another. Note: the only contents of the message _must_ be JSON parseable--no markdown or any other similar formatting.',
-        chat,
-    )
-
-    try:
-        activities = json.loads(oai_response)
-        print(activities)
-        for a in activities:
-            a["activity_begin"] = time_to_datetime(a["activity_begin"])
-            a["activity_end"] = time_to_datetime(a["activity_end"])
-
-        return activities
-    except Exception as e:
-        print(oai_response)
-        print("error parsing OAI response: " + str(e))
-        return {}
-
-
-def goals_from_chat(chat):
-    oai_response = openai_prompt(
-        f'You are an expert assistant designed to convert conversationally-styled messages describing the user\'s goals and turn them into a list of objects, each object of the following JSON format: {{ "name": "string", "description": "string" }}. Note, your response _must_ be an array of JSON objects--maybe even empty! Pay special attention to the verbs in the message--it is _very_ important that you log _all_ goals listed in the message. But also! You _must not be redundant_. There _must not_ be goals logged that fit under the umbrella of another. Note: the only contents of the message _must_ be JSON parseable--no markdown or any other similar formatting. Please note: the chat you receive may be a reply to the email--be careful! You must _only_ pay attention to the replying email--do not pay any mind to the email that is being replied to.',
-        chat,
-    )
-
-    try:
-        goals = json.loads(oai_response)
-
-        return goals
-    except Exception as e:
-        print(oai_response)
-        print("goals_from_chat: error parsing OAI response: " + str(e))
-        return {}
 
 
 def style_email_html(html, recipient, format=True):
@@ -538,8 +427,7 @@ def email_log_activities():
         return str(e), 400
 
 
-def get_newsletter(user):
-    emails = get_user_entries_in_range(user.user_id, 7)
+def get_newsletter(emails):
     formatted_email_text = format_emails_for_gpt(emails)
     oai_response = openai_prompt(EthosDefault.summary, formatted_email_text)
 
@@ -577,15 +465,31 @@ def send_newsletters():
 
     users = User.query.filter_by(active=True).all()
     print(f"sending newsletters to {[u.username for u in users]}")
+
+    successes = []
     for user in users:
         try:
+            emails = get_user_entries_in_range(user.user_id, 7)
             send_email(
                 f'Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
-                get_newsletter(user),
+                get_newsletter(emails),
                 user.username,
             )
+
+            if not user.archiving:
+                successes += emails
         except Exception as e:
             print(f"error generating newsletter for {user.username}: {e}")
+
+    try:
+        for email in successes:
+            db.session.delete(email)
+
+        db.session.commit()
+    except Exception as e:
+        print(
+            f"error deleting email id {email.email_id} for user id {email.user_id}: {e}"
+        )
 
     return "success", 200
 
@@ -664,6 +568,7 @@ def update_settings():
     user = User.query.filter_by(user_id=request.user_id).first()
     user.receiving_logs = request.json["receiving_logs"]
     user.active = request.json["receiving_newsletters"]
+    user.archiving = not request.json["deleting_data"]
 
     try:
         db.session.commit()
@@ -696,9 +601,10 @@ def send_test_newsletters():
         print(f"sending test newsletters to {[u.username for u in users]}")
         for user in users:
             try:
+                emails = get_user_entries_in_range(user.user_id, 7)
                 send_email(
                     f'{{TESTING}} Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
-                    get_newsletter(user),
+                    get_newsletter(emails),
                     user.username,
                 )
             except Exception as e:
