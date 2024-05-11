@@ -1,8 +1,8 @@
-import json
 import os
 import pprint
 import random
 import secrets
+import string
 from datetime import datetime, timedelta
 from email import policy
 from email.parser import BytesParser
@@ -20,7 +20,9 @@ from pinecone import Pinecone
 openai_client = OpenAI()
 ses_client = boto3.client("sesv2")
 pinecone_client = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
+
 pc_index = pinecone_client.Index("ritual")
+memory_index = pinecone_client.Index("ritual-memory")
 
 app = Flask(__name__, static_folder="build", static_url_path="/")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["RITUAL_DB_URL"]
@@ -78,31 +80,6 @@ class Ethos(db.Model):
     core = db.Column(db.String(4096), nullable=False)
     summary = db.Column(db.String(4096))
     feedback = db.Column(db.String(4096))
-
-
-class Activity(db.Model):
-    activity_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"))
-    name = db.Column(db.String(256), nullable=False)
-    activity_begin = db.Column(db.DateTime, nullable=False)
-    activity_end = db.Column(db.DateTime, nullable=False)
-    activity_date = db.Column(db.Date, nullable=False)
-    memo = db.Column(db.String(512), nullable=False)
-
-
-class Goal(db.Model):
-    goal_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"), nullable=False)
-    name = db.Column(db.String(256), nullable=False)
-    description = db.Column(db.String(4096), nullable=False)
-
-
-class Subgoal(db.Model):
-    subgoal_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    goal_id = db.Column(db.Integer, db.ForeignKey("goal.goal_id"), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.user_id"), nullable=False)
-    name = db.Column(db.String(256), nullable=False)
-    description = db.Column(db.String(4096), nullable=False)
 
 
 class Token(db.Model):
@@ -219,23 +196,6 @@ def style_email_html(html, recipient, format=True):
     return formatted
 
 
-def generate_subgoals(goal):
-    oai_response = openai_prompt(
-        "you're a world class coach--of everything. You are opinionated, obsessively creative, and _always_ know exactly what to do in order to achieve a client's goal. Your solutions are _concise_--they never do more than is needed--and are exceedingly precise--they are composed of _very specific_ subtasks that get to the core of the problem and address it entirely. Your words are inspiring and creative. Your guidance is actionable and precise. In this chat, you will be given a goal--you're job is to provide an expertly guided, actionable list of steps to take to accomplish that goal. The client should _never_ walk away with any possible questions on what to do. Distill your list into 5 key points into a JSON array, each object having fields 'name' and a detailed 'description'. Ensure your response is plaintext, without markdown formatting.",
-        f"{goal.name} -- {goal.description}",
-    )
-
-    return [
-        Subgoal(
-            user_id=request.user_id,
-            goal_id=goal.goal_id,
-            name=sg["name"],
-            description=sg["description"],
-        )
-        for sg in json.loads(oai_response)
-    ]
-
-
 def get_text_from_email(email_content):
     html_content = ""
 
@@ -317,20 +277,24 @@ def format_emails_for_gpt(emails):
     return formatted_string
 
 
-# get oai embedding for `text`
-# then find most similar quote
-def get_quote(text):
-    embedding = (
+def get_embedding(text):
+    return (
         openai_client.embeddings.create(input=text, model="text-embedding-3-small")
         .data[0]
         .embedding
     )
 
+
+# get oai embedding for `text`
+# then find most similar quote
+def get_quote(text):
+    embedding = get_embedding(text)
+
     responses = [
         x["metadata"]
         for x in pc_index.query(
             vector=embedding,
-            top_k=10,
+            top_k=5,
             include_metadata=True,
         )["matches"]
     ]
@@ -381,13 +345,13 @@ def email_log_activities():
     deliverer = request.json["username"]
     print(f"logging activities by email from {deliverer}")
 
-    db.session.add(
-        Email(
-            user_id=request.user_id,
-            raw_email=request.json["email_data"],
-            imported_data=False,
-        )
+    email = Email(
+        user_id=request.user_id,
+        raw_email=request.json["email_data"],
+        imported_data=False,
     )
+
+    db.session.add(email)
 
     try:
         user = set_user_active(request.user_id)
@@ -416,6 +380,25 @@ def email_log_activities():
                 deliverer,
             )
 
+        embedding = get_embedding(request.json["email_data"])
+        print(
+            memory_index.upsert(
+                [
+                    {
+                        "id": "".join(
+                            secrets.choice(string.ascii_letters + string.digits)
+                            for _ in range(32)
+                        ),
+                        "values": embedding,
+                        "metadata": {
+                            "user_id": request.user_id,
+                            "email_id": email.email_id,
+                        },
+                    }
+                ]
+            )
+        )
+
         return "success", 200
     except Exception as e:
         print(f"error: {str(e)}")
@@ -429,6 +412,28 @@ def email_log_activities():
 
 def get_newsletter(emails):
     formatted_email_text = format_emails_for_gpt(emails)
+    if len(emails) > 0:
+        memory_embedding = get_embedding(formatted_email_text)
+
+        memory_ids = [
+            x["metadata"]["email_id"]
+            for x in memory_index.query(
+                vector=memory_embedding,
+                top_k=3,
+                include_metadata=True,
+                filter={
+                    "user_id": {"$eq": emails[0].user_id},
+                    "email_id": {"$nin": [e.email_id for e in emails]},
+                },
+            )["matches"]
+        ]
+
+        memories = Email.query.filter(Email.email_id.in_(memory_ids)).all()
+
+        formatted_email_text += "--- Memories ---\n\n"
+        for m in memories:
+            formatted_email_text += get_db_email_text(m) + "\n---\n"
+
     oai_response = openai_prompt(EthosDefault.summary, formatted_email_text)
 
     html = markdown.markdown(oai_response)
@@ -449,9 +454,9 @@ def get_newsletter(emails):
         quote_data["text"] = quote_data["text"][:mark] + "..."
 
     html = (
-        '<blockquote style="margin-bottom: 2em"><p style="font-size: 1.1rem"><i>"'
+        '<blockquote style="margin-bottom: 2em"><p style="font-size: 1.1rem"><i>'
         + quote_data["text"]
-        + f'"</i></p><cite style="font-size: 1rem">— {quote_data["author"]}, {quote_data["title"]}</cite></blockquote><hr>'
+        + f'</i></p><cite style="font-size: 1rem">— {quote_data["author"]}, {quote_data["title"]}</cite></blockquote><hr>'
         + html
     )
 
@@ -525,9 +530,7 @@ def update_settings():
     if request.json["delete_user"]:
         print(f"deleting user id {request.user_id}")
         user_data = (
-            Activity.query.filter_by(user_id=request.user_id).all()
-            + Subgoal.query.filter_by(user_id=request.user_id).all()
-            + Goal.query.filter_by(user_id=request.user_id).all()
+            Email.query.filter_by(user_id=request.user_id).all()
             + User.query.filter_by(user_id=request.user_id).all()
         )
 
