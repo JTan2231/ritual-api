@@ -10,7 +10,7 @@ from functools import wraps
 
 import boto3
 import markdown2 as markdown
-from flask import Flask, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 from flask_apscheduler import APScheduler
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -64,6 +64,7 @@ class User(db.Model):
     receiving_logs = db.Column(db.Boolean, default=True, nullable=False)
     test_user = db.Column(db.Boolean, default=False, nullable=False)
     archiving = db.Column(db.Boolean, default=True, nullable=False)
+    cli_secret = db.Column(db.String(256))
 
 
 class Email(db.Model):
@@ -138,6 +139,40 @@ def token_auth(func):
                 return "Unauthorized", 401
 
             user = User.query.join(Token).filter(Token.data == token).first()
+
+            if user is not None:
+                request.user_id = user.user_id
+                return func(*args, **kwargs)
+            else:
+                return "Unauthorized", 401
+
+    return wrapper
+
+
+# only allows requests within certain time window (Sunday, 7:45 - 8:15)
+def cli_auth(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        now = datetime.now()
+        if (
+            (now.hour == 7 and now.minute < 45)
+            or (now.hour == 8 and now.minute > 15)
+            or now.hour < 7
+            or now.hour > 8
+            or now.weekday() != 6
+        ):
+            return "Unauthorized", 401
+
+        auth = request.headers.get("Authorization")
+        if auth is None:
+            return "Unauthorized", 401
+        else:
+            type, secret = auth.split(" ", 1)
+            type = type.lower()
+            if type != "bearer":
+                return "Unauthorized", 401
+
+            user = User.query.filter(User.cli_secret == secret).first()
 
             if user is not None:
                 request.user_id = user.user_id
@@ -410,30 +445,7 @@ def email_log_activities():
         return str(e), 400
 
 
-def get_newsletter(emails):
-    formatted_email_text = format_emails_for_gpt(emails)
-    if len(emails) > 0:
-        memory_embedding = get_embedding(formatted_email_text)
-
-        memory_ids = [
-            x["metadata"]["email_id"]
-            for x in memory_index.query(
-                vector=memory_embedding,
-                top_k=3,
-                include_metadata=True,
-                filter={
-                    "user_id": {"$eq": emails[0].user_id},
-                    "email_id": {"$nin": [e.email_id for e in emails]},
-                },
-            )["matches"]
-        ]
-
-        memories = Email.query.filter(Email.email_id.in_(memory_ids)).all()
-
-        formatted_email_text += "--- Memories ---\n\n"
-        for m in memories:
-            formatted_email_text += get_db_email_text(m) + "\n---\n"
-
+def get_newsletter(formatted_email_text):
     oai_response = openai_prompt(EthosDefault.summary, formatted_email_text)
 
     html = markdown.markdown(oai_response)
@@ -475,9 +487,32 @@ def send_newsletters():
     for user in users:
         try:
             emails = get_user_entries_in_range(user.user_id, 7)
+            formatted_email_text = format_emails_for_gpt(emails)
+            if len(emails) > 0:
+                memory_embedding = get_embedding(formatted_email_text)
+
+                memory_ids = [
+                    x["metadata"]["email_id"]
+                    for x in memory_index.query(
+                        vector=memory_embedding,
+                        top_k=3,
+                        include_metadata=True,
+                        filter={
+                            "user_id": {"$eq": emails[0].user_id},
+                            "email_id": {"$nin": [e.email_id for e in emails]},
+                        },
+                    )["matches"]
+                ]
+
+                memories = Email.query.filter(Email.email_id.in_(memory_ids)).all()
+
+                formatted_email_text += "--- Memories ---\n\n"
+                for m in memories:
+                    formatted_email_text += get_db_email_text(m) + "\n---\n"
+
             send_email(
                 f'Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
-                get_newsletter(emails),
+                get_newsletter(formatted_email_text),
                 user.username,
             )
 
@@ -497,6 +532,33 @@ def send_newsletters():
         )
 
     return "success", 200
+
+
+@app.route("/cli-newsletters", methods=["POST"])
+@cli_auth
+def cli_newsletters():
+    # get and format any emails from the last 7 days
+    emails = get_user_entries_in_range(request.user_id, 7)
+    formatted_email_text = format_emails_for_gpt(emails)
+    formatted_email_text += "\n\n".join(
+        [f"{e['date']} -- {e['text']}" for e in request.json["entries"]]
+    )
+
+    user = User.query.filter_by(user_id=request.user_id).first()
+    print(f"preparing email for user {user.username}")
+
+    try:
+        send_email(
+            f'Ritual Weekly Report {datetime.now().strftime("%m/%d").lstrip("0").replace("/0", "/")}',
+            get_newsletter(formatted_email_text),
+            user.username,
+        )
+
+        return "", 200
+    except Exception as e:
+        print(f"error generating/sending newsletter for {user.username}: {e}")
+
+        return "error", 400
 
 
 def style_config_status(message):
@@ -593,6 +655,20 @@ def update_settings():
         return "error", 400
 
 
+@app.route("/generate-cli-token", methods=["GET"])
+@token_auth
+def generate_cli_token():
+    user = User.query.filter_by(user_id=request.user_id).first()
+    user.cli_secret = secrets.token_hex(32)
+
+    try:
+        db.session.commit()
+
+        return jsonify({"new_secret": user.cli_secret})
+    except Exception as e:
+        return jsonify({"Error": str(e)}), 400
+
+
 @scheduler.task(
     "cron", id="send_test_newsletters", day_of_week="sat", hour=21, minute=15
 )
@@ -633,7 +709,7 @@ def clean_tokens():
     print("running `clean_tokens`")
     limit = datetime.now() - timedelta(minutes=15)
     with app.app_context():
-        tokens = Token.query.filter(Token.creation_date > limit).all()
+        tokens = Token.query.filter(Token.creation_date < limit).all()
         for token in tokens:
             db.session.delete(token)
 
