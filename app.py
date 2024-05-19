@@ -41,7 +41,7 @@ DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M:%S"
 DATETIME_FORMAT = f"{DATE_FORMAT} {TIME_FORMAT}"
 
-GPT_MODEL = "gpt-4-turbo"
+GPT_MODEL = "gpt-4o"
 
 
 class EthosDefault:
@@ -309,7 +309,7 @@ def format_emails_for_gpt(emails):
 
         formatted_string += "\n\n"
 
-    return formatted_string
+    return formatted_string if len(formatted_string) > 0 else "No emails logged."
 
 
 def get_embedding(text):
@@ -681,9 +681,10 @@ def send_test_newsletters():
         for user in users:
             try:
                 emails = get_user_entries_in_range(user.user_id, 7)
+                formatted_email_text = format_emails_for_gpt(emails)
                 send_email(
                     f'{{TESTING}} Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
-                    get_newsletter(emails),
+                    get_newsletter(formatted_email_text),
                     user.username,
                 )
             except Exception as e:
