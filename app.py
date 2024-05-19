@@ -149,16 +149,17 @@ def token_auth(func):
     return wrapper
 
 
-# only allows requests within certain time window (Sunday, 7:45 - 8:15)
+# only allows requests within certain time window (Sunday, 7:45 - 8:15 CST)
+# times here are in GMT
 def cli_auth(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         now = datetime.now()
         if (
-            (now.hour == 7 and now.minute < 45)
-            or (now.hour == 8 and now.minute > 15)
-            or now.hour < 7
-            or now.hour > 8
+            (now.hour == 12 and now.minute < 45)
+            or (now.hour == 13 and now.minute > 15)
+            or now.hour < 12
+            or now.hour > 13
             or now.weekday() != 6
         ):
             return "Unauthorized", 401
