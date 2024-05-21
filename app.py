@@ -65,6 +65,7 @@ class User(db.Model):
     test_user = db.Column(db.Boolean, default=False, nullable=False)
     archiving = db.Column(db.Boolean, default=True, nullable=False)
     cli_secret = db.Column(db.String(256))
+    last_newsletter = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
 class Email(db.Model):
@@ -517,6 +518,8 @@ def send_newsletters():
                 user.username,
             )
 
+            user.last_newsletter = datetime.now()
+
             if not user.archiving:
                 successes += emails
         except Exception as e:
@@ -554,6 +557,10 @@ def cli_newsletters():
             get_newsletter(formatted_email_text),
             user.username,
         )
+
+        user.last_newsletter = datetime.now()
+
+        db.session.commit()
 
         return "", 200
     except Exception as e:
@@ -704,6 +711,74 @@ def user_last_active_check():
         db.session.commit()
 
     print(f"end `user_last_active_check` -- updated {len(users)} users")
+
+
+# this should really be abstracted to a separate function
+# p much a complete copy+paste from `send_newsletters`
+#
+# "cleanup"/followup function for users that are also using the CLI
+# in case their cron job fails
+@scheduler.task('cron', id='send_remaining_newsletters', day_of_week='sun', hour=13, minute=30)
+def send_remaining_newsletters():
+    with app.app_context():
+        end_date = datetime.now()
+
+        yesterday = datetime.now() - timedelta(days=1)
+        # if the user hasn't received a newsletter yet today
+        users = User.query.filter(User.active == True, User.last_newsletter < yesterday).all()
+        print(f"sending remaining newsletters to {[u.username for u in users]}")
+
+        successes = []
+        for user in users:
+            try:
+                emails = get_user_entries_in_range(user.user_id, 7)
+                formatted_email_text = format_emails_for_gpt(emails)
+                if len(emails) > 0:
+                    memory_embedding = get_embedding(formatted_email_text)
+
+                    memory_ids = [
+                        x["metadata"]["email_id"]
+                        for x in memory_index.query(
+                            vector=memory_embedding,
+                            top_k=3,
+                            include_metadata=True,
+                            filter={
+                                "user_id": {"$eq": emails[0].user_id},
+                                "email_id": {"$nin": [e.email_id for e in emails]},
+                            },
+                        )["matches"]
+                    ]
+
+                    memories = Email.query.filter(Email.email_id.in_(memory_ids)).all()
+
+                    formatted_email_text += "--- Memories ---\n\n"
+                    for m in memories:
+                        formatted_email_text += get_db_email_text(m) + "\n---\n"
+
+                send_email(
+                    f'Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
+                    get_newsletter(formatted_email_text),
+                    user.username,
+                )
+
+                user.last_newsletter = datetime.now()
+
+                if not user.archiving:
+                    successes += emails
+            except Exception as e:
+                print(f"error generating newsletter for {user.username}: {e}")
+
+        try:
+            for email in successes:
+                db.session.delete(email)
+
+            db.session.commit()
+        except Exception as e:
+            print(
+                f"error deleting email id {email.email_id} for user id {email.user_id}: {e}"
+            )
+
+        return "success", 200
 
 
 @scheduler.task("interval", id="clean_tokens", seconds=900, misfire_grace_time=900)
