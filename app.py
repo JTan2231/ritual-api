@@ -36,7 +36,7 @@ CORS(app)
 
 db = SQLAlchemy(app)
 
-TEMPERATURE = 0.01
+TEMPERATURE = 0.99
 DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M:%S"
 DATETIME_FORMAT = f"{DATE_FORMAT} {TIME_FORMAT}"
@@ -580,6 +580,10 @@ def user_config():
         return style_config_status("username not found"), 400
 
     user = User.query.filter_by(username=username).first()
+    if user is None:
+        print(f"user {username} not found")
+        return style_config_status(f"username {username} not found"), 404
+
     token = Token(user_id=user.user_id, data=secrets.token_urlsafe(16))
     db.session.add(token)
     db.session.commit()
@@ -718,14 +722,18 @@ def user_last_active_check():
 #
 # "cleanup"/followup function for users that are also using the CLI
 # in case their cron job fails
-@scheduler.task('cron', id='send_remaining_newsletters', day_of_week='sun', hour=13, minute=30)
+@scheduler.task(
+    "cron", id="send_remaining_newsletters", day_of_week="sun", hour=13, minute=30
+)
 def send_remaining_newsletters():
     with app.app_context():
         end_date = datetime.now()
 
         yesterday = datetime.now() - timedelta(days=1)
         # if the user hasn't received a newsletter yet today
-        users = User.query.filter(User.active == True, User.last_newsletter < yesterday).all()
+        users = User.query.filter(
+            User.active == True, User.last_newsletter < yesterday
+        ).all()
         print(f"sending remaining newsletters to {[u.username for u in users]}")
 
         successes = []
