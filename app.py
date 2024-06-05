@@ -10,6 +10,7 @@ from functools import wraps
 
 import boto3
 import markdown2 as markdown
+import requests
 from flask import Flask, jsonify, request, send_from_directory
 from flask_apscheduler import APScheduler
 from flask_cors import CORS
@@ -48,11 +49,45 @@ class EthosDefault:
     core = "A friendly, helpful partner focused on the routines, rituals, and personal growth of the user."
 
 
-with open("prompts/feedback.txt", "r") as f:
-    EthosDefault.feedback = f.read()
-
 with open("prompts/summary.txt", "r") as f:
     EthosDefault.summary = f.read()
+
+
+class Emotions:
+    HAPPINESS = "Here's an example of the user feeling happiness."
+    SADNESS = "Here's an example of the user feeling sadness."
+    ANGER = "Here's an example of the user feeling anger."
+    FEAR = "Here's an example of the user feeling fear."
+    EXCITEMENT = "Here's an example of the user feeling excitement."
+    LONELINESS = "Here's an example of the user feeling loneliness."
+    CALMNESS = "Here's an example of the user feeling calmness."
+    ANXIETY = "Here's an example of the user feeling anxiety."
+    LOVE = "Here's an example of the user feeling love."
+    CONFUSION = "Here's an example of the user feeling confusion."
+    GRATITUDE = "Here's an example of the user feeling gratitude."
+    JEALOUSY = "Here's an example of the user feeling jealousy."
+    RELIEF = "Here's an example of the user feeling relief."
+    EMBARRASSMENT = "Here's an example of the user feeling embarrassment."
+    BOREDOM = "Here's an example of the user feeling boredom."
+    PRIDE = "Here's an example of the user feeling pride."
+    GUILT = "Here's an example of the user feeling guilt."
+    SHAME = "Here's an example of the user feeling shame."
+    HOPE = "Here's an example of the user feeling hope."
+    DISAPPOINTMENT = "Here's an example of the user feeling disappointment."
+    NOSTALGIA = "Here's an example of the user feeling nostalgia."
+    SYMPATHY = "Here's an example of the user feeling sympathy."
+    FRUSTRATION = "Here's an example of the user feeling frustration."
+    CONTENTMENT = "Here's an example of the user feeling contentment."
+
+    @classmethod
+    def list_emotions(cls):
+        return [
+            value
+            for name, value in cls.__dict__.items()
+            if not name.startswith("__")
+            and name != "list_emotions"
+            and not callable(value)
+        ]
 
 
 class User(db.Model):
@@ -339,6 +374,39 @@ def get_quote(text):
     return random.choice(responses)
 
 
+# @app.route("/analyze-emails", methods=["POST"])
+def analyze_emails():
+    emails = get_user_entries_in_range(1, 30)
+    ids = [e.email_id for e in emails]
+
+    counts = {}
+    for emotion in Emotions.list_emotions():
+        print(f"analyzing for {emotion}")
+        emotion_embedding = get_embedding(emotion)
+
+        closest = [
+            (r["score"], r["metadata"]["email_id"])
+            for r in memory_index.query(
+                vector=emotion_embedding,
+                top_k=1,
+                include_metadata=True,
+                filter={"email_id": {"$in": ids}},
+            )["matches"][:1]
+        ][0]
+
+        counts[emotion] = closest
+
+    total = 0
+    for emotion, email_id in counts.items():
+        # email = Email.query.filter_by(email_id=email_id[1]).first()
+        print(f"{emotion}, {email_id[0]}: {email_id[1]}")
+        print("------------")
+
+        total += email_id[0]
+
+    print(f"average score: {total / len(counts)}")
+
+
 @app.route("/newsletter-signup", methods=["POST"])
 def newsletter_signup():
     email = request.json["email"]
@@ -477,6 +545,39 @@ def get_newsletter(formatted_email_text):
     return html
 
 
+def get_exa_webpages(email):
+    query = (
+        get_db_email_text(email)
+        + "\n---\nHere's a link most relevant to the above entry: "
+    )
+
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "x-api-key": os.environ["EXAI_API_KEY"],
+    }
+
+    body = {"query": query, "category": "personal site"}
+
+    webpages = (
+        requests.post("https://api.exa.ai/search", headers=headers, json=body).json()
+    )["results"]
+
+    page_ids = [x["id"] for x in webpages]
+
+    contents_body = {"ids": page_ids, "text": {"maxCharacters": 512}}
+
+    page_contents = (
+        requests.post(
+            "https://api.exa.ai/contents", headers=headers, json=contents_body
+        ).json()
+    )["results"]
+
+    return [
+        {"url": x["url"], "title": x["title"], "text": x["text"]} for x in page_contents
+    ]
+
+
 @app.route("/send-newsletters", methods=["POST"])
 @email_auth
 def send_newsletters():
@@ -489,6 +590,14 @@ def send_newsletters():
     for user in users:
         try:
             emails = get_user_entries_in_range(user.user_id, 7)
+
+            webpages = []
+            for e in emails:
+                webpages += get_exa_webpages(e)
+
+            # dirty way to get rid of duplicate urls
+            webpages = {w["url"]: w for w in webpages}
+
             formatted_email_text = format_emails_for_gpt(emails)
             if len(emails) > 0:
                 memory_embedding = get_embedding(formatted_email_text)
@@ -512,9 +621,17 @@ def send_newsletters():
                 for m in memories:
                     formatted_email_text += get_db_email_text(m) + "\n---\n"
 
+            formatted_email_text += "--- Webpages ---\n\n"
+            for w in webpages.values():
+                formatted_email_text += (
+                    f"{w['title']} -- {w['url']}\n{w['text']}\n---\n"
+                )
+
+            newsletter = get_newsletter(formatted_email_text)
+
             send_email(
                 f'Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
-                get_newsletter(formatted_email_text),
+                newsletter,
                 user.username,
             )
 
