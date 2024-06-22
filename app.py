@@ -1,6 +1,7 @@
 import os
 import pprint
 import random
+import re
 import secrets
 import string
 from datetime import datetime, timedelta
@@ -8,9 +9,11 @@ from email import policy
 from email.parser import BytesParser
 from functools import wraps
 
+import bcrypt
 import boto3
 import markdown2 as markdown
 import requests
+from bs4 import BeautifulSoup
 from flask import Flask, jsonify, request, send_from_directory
 from flask_apscheduler import APScheduler
 from flask_cors import CORS
@@ -100,6 +103,7 @@ class User(db.Model):
     test_user = db.Column(db.Boolean, default=False, nullable=False)
     archiving = db.Column(db.Boolean, default=True, nullable=False)
     cli_secret = db.Column(db.String(256))
+    web_secret = db.Column(db.String(256))
     last_newsletter = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
@@ -368,6 +372,7 @@ def get_quote(text):
             vector=embedding,
             top_k=5,
             include_metadata=True,
+            filter={"author": {"$ne": "Frank Herbert"}},
         )["matches"]
     ]
 
@@ -407,37 +412,73 @@ def analyze_emails():
     print(f"average score: {total / len(counts)}")
 
 
+def get_color(formatted_email_text):
+    openai_response = openai_prompt(
+        "Assign a hex color code representing the mood of the user's input. Ensure these colors are subtle and off-colored, gently guiding the user's subconscious to the desired tone and mood. Respond _only_ with the hex code.",
+        formatted_email_text,
+    )
+
+    hex_code = "#FFFFFF"
+
+    hex_regex = r"#[0-9a-fA-F]{6}"
+    if re.match(hex_regex, openai_response):
+        hex_code = re.search(hex_regex, openai_response).group(0)
+    else:
+        print('color response not valid, defaulting to "#FFFFFF"')
+        print('response: "' + openai_response + '"')
+
+    hex_code = hex_code[1:]
+    # subtracting from 255 to treat it as origin
+    rgb = tuple(int(hex_code[i : i + 2], 16) for i in (0, 2, 4))
+
+    radius = 80
+
+    # normalize to within radius
+    magnitude = sum((255 - rgb[i]) ** 2 for i in range(3)) ** 0.5
+
+    if magnitude > radius:
+        rgb = tuple(255 - int((255 - rgb[i]) * radius / magnitude) for i in range(3))
+
+    hex_code = "#" + "".join(f"{x:02x}" for x in rgb)
+
+    return hex_code
+
+
+def create_user(email):
+    user = User.query.filter_by(username=email).first()
+    if user is not None:
+        return "This user is already registered", 409
+
+    user = User(username=email, password=secrets.token_hex(32))
+    db.session.add(user)
+    db.session.commit()
+
+    print(f"user created for {email}")
+
+    with open("onboarding.html", "r") as f:
+        print(f"sending onboarding email to {email}")
+        ses_client.send_email(
+            FromEmailAddress="ritual@joeytan.dev",
+            Destination={"ToAddresses": [email]},
+            Content={
+                "Simple": {
+                    "Subject": {"Data": "Welcome to Ritual!"},
+                    "Body": {"Html": {"Data": f.read()}},
+                }
+            },
+            ReplyToAddresses=["ritual@joeytan.dev"],
+        )
+
+    return user
+
+
 @app.route("/newsletter-signup", methods=["POST"])
 def newsletter_signup():
     email = request.json["email"]
 
     print(f"newsletter_signup called for email '{email}'")
-
-    user = User.query.filter_by(username=email).first()
-    if user is not None:
-        return "This user is already registered", 409
-
     try:
-        db.session.add(User(username=email, password=secrets.token_hex(32)))
-        db.session.commit()
-
-        print(f"user created for {email}")
-
-        with open("onboarding.html", "r") as f:
-            print(f"sending onboarding email to {email}")
-            ses_client.send_email(
-                FromEmailAddress="ritual@joeytan.dev",
-                Destination={"ToAddresses": [email]},
-                Content={
-                    "Simple": {
-                        "Subject": {"Data": "Welcome to Ritual!"},
-                        "Body": {"Html": {"Data": f.read()}},
-                    }
-                },
-                ReplyToAddresses=["ritual@joeytan.dev"],
-            )
-
-        return "Success", 200
+        create_user(email)
     except Exception as e:
         print(f"error: {str(e)}")
 
@@ -516,15 +557,17 @@ def email_log_activities():
 
 
 def get_newsletter(formatted_email_text):
+    # can we do this without prompting gpt twice?
     oai_response = openai_prompt(EthosDefault.summary, formatted_email_text)
 
     html = markdown.markdown(oai_response)
     for tag in ("<h1>", "<h2>", "<h3>", "<h4>"):
         html = html.replace(tag, tag[:-1] + ' style="font-family: Helvetica;">')
 
-    quote_data = get_quote(formatted_email_text)
-
     max_len = 500
+    quote_data = get_quote(formatted_email_text)
+    color = get_color(quote_data["text"][:max_len])
+
     # find earliest punctuation after the `max_len` char mark and cut off
     if len(quote_data["text"]) > max_len:
         mark = max_len
@@ -536,13 +579,38 @@ def get_newsletter(formatted_email_text):
         quote_data["text"] = quote_data["text"][:mark] + "..."
 
     html = (
+        '<div style="background-color: transparent; margin: auto; padding: 20px;">'
         '<blockquote style="margin-bottom: 2em"><p style="font-size: 1.1rem"><i>'
         + quote_data["text"]
         + f'</i></p><cite style="font-size: 1rem">— {quote_data["author"]}, {quote_data["title"]}</cite></blockquote><hr>'
         + html
+        + "</div>"
     )
 
-    return html
+    return html, color
+
+
+def jsonify_html(html_string):
+    soup = BeautifulSoup(html_string, "html.parser")
+
+    def element_to_dict(element):
+        print(element.name)
+        if element.name is None:
+            return {"tag": "text", "attributes": {}, "text": element.string.strip()}
+
+        element_dict = {
+            "tag": element.name,
+            "attributes": element.attrs,
+            "children": [
+                element_to_dict(child)
+                for child in element.children
+                if child.name or child.string.strip()
+            ],
+        }
+
+        return element_dict
+
+    return element_to_dict(soup)
 
 
 def get_exa_webpages(email):
@@ -583,7 +651,7 @@ def get_exa_webpages(email):
 def send_newsletters():
     end_date = datetime.now()
 
-    users = User.query.filter_by(active=True).all()
+    users = User.query.filter_by(active=True, user_id=1).all()
     print(f"sending newsletters to {[u.username for u in users]}")
 
     successes = []
@@ -627,7 +695,7 @@ def send_newsletters():
                     f"{w['title']} -- {w['url']}\n{w['text']}\n---\n"
                 )
 
-            newsletter = get_newsletter(formatted_email_text)
+            newsletter, _ = get_newsletter(formatted_email_text)
 
             send_email(
                 f'Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
@@ -671,7 +739,7 @@ def cli_newsletters():
     try:
         send_email(
             f'Ritual Weekly Report {datetime.now().strftime("%m/%d").lstrip("0").replace("/0", "/")}',
-            get_newsletter(formatted_email_text),
+            get_newsletter(formatted_email_text)[0],
             user.username,
         )
 
@@ -690,6 +758,12 @@ def style_config_status(message):
     return f'<div style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: monospace;">{message}</div>'
 
 
+def create_token(user_id):
+    token = Token(user_id=user_id, data=secrets.token_urlsafe(16))
+
+    return token
+
+
 @app.route("/get-config-token", methods=["GET"])
 def user_config():
     username = request.args.get("email", None)
@@ -701,7 +775,7 @@ def user_config():
         print(f"user {username} not found")
         return style_config_status(f"username {username} not found"), 404
 
-    token = Token(user_id=user.user_id, data=secrets.token_urlsafe(16))
+    token = create_token(user.user_id)
     db.session.add(token)
     db.session.commit()
 
@@ -798,6 +872,94 @@ def generate_cli_token():
         return jsonify({"Error": str(e)}), 400
 
 
+@app.route("/user-lookup", methods=["GET"])
+def user_lookup():
+    email = request.args.get("username", None)
+    if email is None:
+        return "Bad request", 400
+
+    user = User.query.filter_by(username=email).first()
+
+    return jsonify(
+        {
+            "exists": user is not None and user.web_secret is not None,
+        }
+    )
+
+
+@app.route("/web-login", methods=["POST"])
+def web_login():
+    email = request.json["email"]
+    password = request.json["password"]
+
+    user = User.query.filter_by(username=email).first()
+    if user is None:
+        return "Unauthorized", 401
+
+    if bcrypt.checkpw(password.encode("utf-8"), bytes(user.web_secret, "utf-8")):
+        try:
+            token = create_token(user.user_id)
+            db.session.add(token)
+            db.session.commit()
+
+            return jsonify({"token": token.data})
+        except Exception as e:
+            return str(e), 400
+
+    return "Unauthorized", 401
+
+
+@app.route("/web-register", methods=["POST"])
+def web_register():
+    email = request.json["email"]
+    password = request.json["password"]
+
+    user = User.query.filter_by(username=email).first()
+    if user is None:
+        try:
+            user = create_user(email)
+        except Exception as e:
+            print(f"error: {str(e)}")
+
+            return str(e), 400
+
+    user.web_secret = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+    token = create_token(user.user_id)
+    try:
+        db.session.add(token)
+        db.session.commit()
+    except Exception as e:
+        return str(e), 400
+
+    return jsonify({"token": token.data})
+
+
+@app.route("/web-newsletter", methods=["POST"])
+@token_auth
+def web_newsletter():
+    user = User.query.filter_by(user_id=request.user_id).first()
+    print(f"generating newsletter for {user.username}")
+
+    entries = request.json["entries"]
+    formatted_string = ""
+    for e in entries:
+        formatted_string += f"{e['createdDate']} -- "
+        formatted_string += e["content"]
+        formatted_string += "\n\n"
+
+    try:
+        newsletter, color = get_newsletter(formatted_string)
+        html = jsonify_html(newsletter)
+
+        return jsonify(
+            {"newsletter": newsletter, "color": color, "jsonified_html": html}
+        )
+    except Exception as e:
+        print(f"error generating/sending newsletter for {user.username}: {e}")
+
+        return "error", 400
+
+
 @scheduler.task(
     "cron", id="send_test_newsletters", day_of_week="sat", hour=21, minute=15
 )
@@ -813,7 +975,7 @@ def send_test_newsletters():
                 formatted_email_text = format_emails_for_gpt(emails)
                 send_email(
                     f'{{TESTING}} Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
-                    get_newsletter(formatted_email_text),
+                    get_newsletter(formatted_email_text)[0],
                     user.username,
                 )
             except Exception as e:
@@ -882,7 +1044,7 @@ def send_remaining_newsletters():
 
                 send_email(
                     f'Ritual Weekly Report {end_date.strftime("%m/%d").lstrip("0").replace("/0", "/")}',
-                    get_newsletter(formatted_email_text),
+                    get_newsletter(formatted_email_text)[0],
                     user.username,
                 )
 
@@ -909,7 +1071,7 @@ def send_remaining_newsletters():
 @scheduler.task("interval", id="clean_tokens", seconds=900, misfire_grace_time=900)
 def clean_tokens():
     print("running `clean_tokens`")
-    limit = datetime.now() - timedelta(minutes=15)
+    limit = datetime.now() - timedelta(minutes=30)
     with app.app_context():
         tokens = Token.query.filter(Token.creation_date < limit).all()
         for token in tokens:
