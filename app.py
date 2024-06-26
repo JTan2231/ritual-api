@@ -594,7 +594,6 @@ def jsonify_html(html_string):
     soup = BeautifulSoup(html_string, "html.parser")
 
     def element_to_dict(element):
-        print(element.name)
         if element.name is None:
             return {"tag": "text", "attributes": {}, "text": element.string.strip()}
 
@@ -613,11 +612,19 @@ def jsonify_html(html_string):
     return element_to_dict(soup)
 
 
-def get_exa_webpages(email):
-    query = (
-        get_db_email_text(email)
-        + "\n---\nHere's a link most relevant to the above entry: "
-    )
+def get_exa_webpages(email_text):
+    def exa_post(url, headers, body, result_key):
+        response = requests.post(url, headers=headers, json=body)
+        if response.status_code != 200:
+            print(f"error: exa.ai request failed -- {response.text}")
+            if "API key usage limit reached" not in response.text:
+                print('url: "' + url + '"')
+                print('body: "' + str(body) + '"')
+            return []
+
+        return response.json()[result_key]
+
+    query = email_text + "\n---\nHere's a link most relevant to the above entry: "
 
     headers = {
         "accept": "application/json",
@@ -627,19 +634,18 @@ def get_exa_webpages(email):
 
     body = {"query": query, "category": "personal site"}
 
-    webpages = (
-        requests.post("https://api.exa.ai/search", headers=headers, json=body).json()
-    )["results"]
+    webpages = exa_post("https://api.exa.ai/search", headers, body, "results")
 
+    # make a random selection from the top N results
+    webpages = sorted(webpages, key=lambda x: x["score"], reverse=True)[:30]
+    webpages = random.sample(webpages, min(10, len(webpages)))
     page_ids = [x["id"] for x in webpages]
 
     contents_body = {"ids": page_ids, "text": {"maxCharacters": 512}}
 
-    page_contents = (
-        requests.post(
-            "https://api.exa.ai/contents", headers=headers, json=contents_body
-        ).json()
-    )["results"]
+    page_contents = exa_post(
+        "https://api.exa.ai/contents", headers, contents_body, "results"
+    )
 
     return [
         {"url": x["url"], "title": x["title"], "text": x["text"]} for x in page_contents
@@ -661,7 +667,7 @@ def send_newsletters():
 
             webpages = []
             for e in emails:
-                webpages += get_exa_webpages(e)
+                webpages += get_exa_webpages(get_db_email_text(e))
 
             # dirty way to get rid of duplicate urls
             webpages = {w["url"]: w for w in webpages}
@@ -938,18 +944,46 @@ def web_register():
 @token_auth
 def web_newsletter():
     user = User.query.filter_by(user_id=request.user_id).first()
-    print(f"generating newsletter for {user.username}")
 
+    latest_sunday = (
+        datetime.now() - timedelta(days=datetime.now().weekday() + 1)
+    ).replace(hour=0, minute=0, second=0, microsecond=0)
+    if user.last_newsletter > latest_sunday:
+        print('rate limit reached for user "' + user.username + '"')
+        return "Too Many Requests", 429
+
+    print(f"generating newsletter for {user.username}")
     entries = request.json["entries"]
+
+    webpages = []
+    for e in entries:
+        webpages += get_exa_webpages(e["content"])
+
+    # dirty way to get rid of duplicate urls
+    webpages = {w["url"]: w for w in webpages}
+
     formatted_string = ""
     for e in entries:
-        formatted_string += f"{e['createdDate']} -- "
-        formatted_string += e["content"]
-        formatted_string += "\n\n"
+        entry_text = f"{e['createdDate']} -- {e['content']}\n\n"
+        if len(formatted_string + entry_text) < 7000:
+            formatted_string += entry_text
+        else:
+            break
+
+    formatted_string += "--- Webpages ---\n\n"
+    for w in webpages.values():
+        webpage_text = f"{w['title']} -- {w['url']}\n{w['text']}\n---\n"
+        if len(formatted_string + webpage_text) < 7000:
+            formatted_string += webpage_text
+        else:
+            break
 
     try:
         newsletter, color = get_newsletter(formatted_string)
         html = jsonify_html(newsletter)
+
+        user.last_newsletter = datetime.now()
+        db.session.commit()
 
         return jsonify(
             {"newsletter": newsletter, "color": color, "jsonified_html": html}
