@@ -945,8 +945,9 @@ def web_register():
 def web_newsletter():
     user = User.query.filter_by(user_id=request.user_id).first()
 
+    today = datetime.now().weekday()
     latest_sunday = (
-        datetime.now() - timedelta(days=datetime.now().weekday() + 1)
+        (datetime.now() - timedelta(days=today + 1)) if today != 6 else datetime.now()
     ).replace(hour=0, minute=0, second=0, microsecond=0)
     if user.last_newsletter > latest_sunday:
         print('rate limit reached for user "' + user.username + '"')
